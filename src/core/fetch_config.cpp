@@ -18,8 +18,6 @@
 #endif
 #include "clogger/clogger.h"
 
-#define CONFIG_OTA_VERSION_URL "https://api.tenclass.net/xiaozhi/ota/"
-
 namespace {
 
 std::string GetMacAddress() {
