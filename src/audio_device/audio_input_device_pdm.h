@@ -16,7 +16,16 @@ class PdmAudioInputDevice : public AudioInputDevice {
   bool OpenInput(uint32_t sample_rate) override {
     CloseInput();
 
-    i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t rx_chan_cfg = {
+        .id = I2S_NUM_0,
+        .role = I2S_ROLE_MASTER,
+        .dma_desc_num = 2,
+        .dma_frame_num = 240,
+        .auto_clear_after_cb = true,
+        .auto_clear_before_cb = false,
+        .allow_pd = false,
+        .intr_priority = 0,
+    };
     ESP_ERROR_CHECK(i2s_new_channel(&rx_chan_cfg, nullptr, &i2s_rx_handle_));
 
     i2s_pdm_rx_config_t rx_pdm_cfg = {

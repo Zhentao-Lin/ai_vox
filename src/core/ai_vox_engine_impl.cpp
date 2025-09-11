@@ -10,22 +10,19 @@
 #include "ai_vox_observer.h"
 #include "audio_input_engine.h"
 #include "audio_output_engine.h"
-#include "espressif_button/button_gpio.h"
-#include "espressif_button/iot_button.h"
 #include "fetch_config.h"
 #include "wake_net/wake_net.h"
 
 #ifndef CLOGGER_SEVERITY
 #define CLOGGER_SEVERITY CLOGGER_SEVERITY_WARN
 #endif
-
 #include "clogger/clogger.h"
 
 namespace ai_vox {
 
 namespace {
 
-enum WebScoketFrameType : uint8_t {
+enum WebSocketFrameType : uint8_t {
   kWebsocketTextFrame = 0x01,    // 文本帧
   kWebsocketBinaryFrame = 0x02,  // 二进制帧
   kWebsocketCloseFrame = 0x08,   // 关闭连接
@@ -105,11 +102,9 @@ EngineImpl::EngineImpl()
           {"Authorization", "Bearer test-token"},
       },
       task_queue_("AiVoxMain", 1024 * 4, tskIDLE_PRIORITY + 1) {
-  CLOGD();
 }
 
 EngineImpl::~EngineImpl() {
-  CLOGD();
   // TODO
 }
 
@@ -120,15 +115,6 @@ void EngineImpl::SetObserver(std::shared_ptr<Observer> observer) {
   }
 
   observer_ = std::move(observer);
-}
-
-void EngineImpl::SetTrigger(const gpio_num_t gpio) {
-  std::lock_guard lock(mutex_);
-  if (state_ != State::kIdle) {
-    return;
-  }
-
-  trigger_pin_ = gpio;
 }
 
 void EngineImpl::SetOtaUrl(const std::string url) {
@@ -170,26 +156,23 @@ void EngineImpl::Start(std::shared_ptr<AudioInputDevice> audio_input_device, std
   audio_output_device_ = std::move(audio_output_device);
 #ifdef ARDUINO_ESP32S3_DEV
   wake_net_ = std::make_unique<WakeNet>([this]() { task_queue_.Enqueue([this]() { OnWakeUp(); }); }, audio_input_device_);
+  wake_net_->Start();
 #endif
 
-  button_config_t btn_cfg = {
-      .long_press_time = 1000,
-      .short_press_time = 50,
-  };
+  // button_config_t btn_cfg = {
+  //     .long_press_time = 1000,
+  //     .short_press_time = 50,
+  // };
 
-  button_gpio_config_t gpio_cfg = {
-      .gpio_num = trigger_pin_,
-      .active_level = 0,
-      .enable_power_save = true,
-      .disable_pull = false,
-  };
+  // button_gpio_config_t gpio_cfg = {
+  //     .gpio_num = trigger_pin_,
+  //     .active_level = 0,
+  //     .enable_power_save = false,
+  //     .disable_pull = false,
+  // };
 
-  ESP_ERROR_CHECK(iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &button_handle_));
-  ESP_ERROR_CHECK(iot_button_register_cb(button_handle_, BUTTON_SINGLE_CLICK, nullptr, OnButtonClick, this));
-
-  ChangeState(State::kInited);
-  LoadProtocol();
-
+  // ESP_ERROR_CHECK(iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &button_handle_));
+  // ESP_ERROR_CHECK(iot_button_register_cb(button_handle_, BUTTON_SINGLE_CLICK, nullptr, OnButtonClick, this));
   esp_websocket_client_config_t websocket_cfg;
   memset(&websocket_cfg, 0, sizeof(websocket_cfg));
   websocket_cfg.uri = websocket_url_.c_str();
@@ -209,19 +192,30 @@ void EngineImpl::Start(std::shared_ptr<AudioInputDevice> audio_input_device, std
   esp_websocket_client_append_header(web_socket_client_, "Device-Id", GetMacAddress().c_str());
   esp_websocket_client_append_header(web_socket_client_, "Client-Id", uuid_.c_str());
   esp_websocket_register_events(web_socket_client_, WEBSOCKET_EVENT_ANY, &EngineImpl::OnWebsocketEvent, this);
+
+  ChangeState(State::kInitd);
+  LoadProtocol();
 }
 
-void EngineImpl::OnButtonClick(void *button_handle, void *self) {
-  reinterpret_cast<EngineImpl *>(self)->OnButtonClick();
+void EngineImpl::Advance() {
+  std::lock_guard lock(mutex_);
+  if (state_ == State::kIdle) {
+    return;
+  }
+  task_queue_.Enqueue([this]() { AdvanceInternal(); });
 }
+
+// void EngineImpl::OnButtonClick(void *button_handle, void *self) {
+//   reinterpret_cast<EngineImpl *>(self)->OnButtonClick();
+// }
 
 void EngineImpl::OnWebsocketEvent(void *self, esp_event_base_t base, int32_t event_id, void *event_data) {
   reinterpret_cast<EngineImpl *>(self)->OnWebsocketEvent(base, event_id, event_data);
 }
 
-void EngineImpl::OnButtonClick() {
-  task_queue_.Enqueue([this]() { OnTriggered(); });
-}
+// void EngineImpl::OnButtonClick() {
+//   task_queue_.Enqueue([this]() { AdvanceInternal(); });
+// }
 
 void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void *event_data) {
   esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
@@ -343,7 +337,7 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
     auto *state_json = cJSON_GetObjectItem(root_obj.get(), "state");
     if (cJSON_IsString(state_json)) {
       if (strcmp("start", state_json->valuestring) == 0) {
-        CLOG("tts start");
+        CLOGI("tts start");
 
         if (state_ == State::kSpeaking) {
           CLOGI("already speaking");
@@ -361,14 +355,14 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
         audio_output_engine_ = std::make_shared<AudioOutputEngine>(audio_output_device_, audio_frame_duration_);
         ChangeState(State::kSpeaking);
       } else if (strcmp("stop", state_json->valuestring) == 0) {
-        CLOG("tts stop");
+        CLOGI("tts stop");
         if (audio_output_engine_) {
           audio_output_engine_->NotifyDataEnd([this]() { task_queue_.Enqueue([this]() { OnAudioOutputDataConsumed(); }); });
         }
       } else if (strcmp("sentence_start", state_json->valuestring) == 0) {
         auto text = cJSON_GetObjectItem(root_obj.get(), "text");
         if (text != nullptr) {
-          CLOG("<< %s", text->valuestring);
+          CLOGI("<< %s", text->valuestring);
           if (observer_) {
             observer_->PushEvent(Observer::ChatMessageEvent{ChatRole::kAssistant, text->valuestring});
           }
@@ -380,7 +374,7 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
   } else if (type == "stt") {
     auto text = cJSON_GetObjectItem(root_obj.get(), "text");
     if (text != nullptr) {
-      CLOG(">> %s", text->valuestring);
+      CLOGI(">> %s", text->valuestring);
       if (observer_) {
         observer_->PushEvent(Observer::ChatMessageEvent{ChatRole::kUser, text->valuestring});
       }
@@ -388,7 +382,7 @@ void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
   } else if (type == "llm") {
     auto emotion = cJSON_GetObjectItem(root_obj.get(), "emotion");
     if (cJSON_IsString(emotion)) {
-      CLOG("emotion: %s", emotion->valuestring);
+      CLOGI("emotion: %s", emotion->valuestring);
       if (observer_) {
         observer_->PushEvent(Observer::EmotionEvent{emotion->valuestring});
       }
@@ -490,10 +484,10 @@ void EngineImpl::OnAudioOutputDataConsumed() {
   StartListening();
 }
 
-void EngineImpl::OnTriggered() {
+void EngineImpl::AdvanceInternal() {
   CLOGI();
   switch (state_) {
-    case State::kInited: {
+    case State::kInitd: {
       LoadProtocol();
       break;
     }
@@ -520,6 +514,10 @@ void EngineImpl::OnTriggered() {
 void EngineImpl::OnWakeUp() {
   CLOGI();
   switch (state_) {
+    case State::kInitd: {
+      LoadProtocol();
+      break;
+    }
     case State::kStandby: {
       if (ConnectWebSocket()) {
         ChangeState(State::kWebsocketConnectingWithWakeup);
@@ -538,8 +536,8 @@ void EngineImpl::OnWakeUp() {
 
 void EngineImpl::LoadProtocol() {
   CLOGI();
-  if (state_ != State::kInited) {
-    CLOG("invalid state: %u", state_);
+  if (state_ != State::kInitd) {
+    CLOGI("invalid state: %u", state_);
     return;
   }
 
@@ -549,37 +547,35 @@ void EngineImpl::LoadProtocol() {
 
   if (!config.has_value()) {
     CLOGE("GetConfigFromServer failed");
-    ChangeState(State::kInited);
+    ChangeState(State::kInitd);
     return;
   }
 
-  CLOG("mqtt endpoint: %s", config->mqtt.endpoint.c_str());
-  CLOG("mqtt client_id: %s", config->mqtt.client_id.c_str());
-  CLOG("mqtt username: %s", config->mqtt.username.c_str());
-  CLOG("mqtt password: %s", config->mqtt.password.c_str());
-  CLOG("mqtt publish_topic: %s", config->mqtt.publish_topic.c_str());
-  CLOG("mqtt subscribe_topic: %s", config->mqtt.subscribe_topic.c_str());
+  CLOGI("mqtt endpoint: %s", config->mqtt.endpoint.c_str());
+  CLOGI("mqtt client_id: %s", config->mqtt.client_id.c_str());
+  CLOGI("mqtt username: %s", config->mqtt.username.c_str());
+  CLOGI("mqtt password: %s", config->mqtt.password.c_str());
+  CLOGI("mqtt publish_topic: %s", config->mqtt.publish_topic.c_str());
+  CLOGI("mqtt subscribe_topic: %s", config->mqtt.subscribe_topic.c_str());
 
-  CLOG("activation code: %s", config->activation.code.c_str());
-  CLOG("activation message: %s", config->activation.message.c_str());
+  CLOGI("activation code: %s", config->activation.code.c_str());
+  CLOGI("activation message: %s", config->activation.message.c_str());
 
   if (!config->activation.code.empty()) {
     if (observer_) {
       observer_->PushEvent(Observer::ActivationEvent{config->activation.code, config->activation.message});
     }
-    ChangeState(State::kInited);
+    ChangeState(State::kInitd);
     return;
   }
-#ifdef ARDUINO_ESP32S3_DEV
-  wake_net_->Start();
-#endif
+
   ChangeState(State::kStandby);
   return;
 }
 
 void EngineImpl::StartListening() {
   if (state_ != State::kWebsocketConnected && state_ != State::kWebsocketConnectedWithWakeup && state_ != State::kSpeaking) {
-    CLOG("invalid state: %u", state_);
+    CLOGI("invalid state: %u", state_);
     return;
   }
 
@@ -637,7 +633,7 @@ void EngineImpl::AbortSpeaking() {
   const auto length = strlen(text.get());
   CLOGI("sending text: %.*s", static_cast<int>(length), text.get());
   esp_websocket_client_send_text(web_socket_client_, text.get(), length, pdMS_TO_TICKS(5000));
-  CLOG("OK");
+  CLOGI("OK");
 }
 
 void EngineImpl::AbortSpeaking(const std::string &reason) {
@@ -710,7 +706,7 @@ void EngineImpl::ChangeState(const State new_state) {
     switch (state) {
       case State::kIdle:
         return ChatState::kIdle;
-      case State::kInited:
+      case State::kInitd:
         return ChatState::kIniting;
       case State::kLoadingProtocol:
         return ChatState::kIniting;

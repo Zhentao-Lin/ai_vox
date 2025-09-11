@@ -20,7 +20,16 @@ class AudioInputDeviceI2sStd : public AudioInputDevice {
  private:
   bool OpenInput(uint32_t sample_rate) override {
     CloseInput();
-    i2s_chan_config_t rx_chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    i2s_chan_config_t rx_chan_cfg = {
+        .id = I2S_NUM_0,
+        .role = I2S_ROLE_MASTER,
+        .dma_desc_num = 2,
+        .dma_frame_num = 320,
+        .auto_clear_after_cb = true,
+        .auto_clear_before_cb = false,
+        .allow_pd = false,
+        .intr_priority = 0,
+    };
     ESP_ERROR_CHECK(i2s_new_channel(&rx_chan_cfg, nullptr, &i2s_rx_handle_));
 
     i2s_std_config_t rx_std_cfg = {.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
@@ -75,23 +84,6 @@ class AudioInputDeviceI2sStd : public AudioInputDevice {
   const gpio_num_t pin_ws_ = GPIO_NUM_NC;
   const gpio_num_t pin_din_ = GPIO_NUM_NC;
   i2s_chan_handle_t i2s_rx_handle_ = nullptr;
-  //   i2s_std_slot_config_t slot_cfg_ = {
-  //       .data_bit_width = I2S_DATA_BIT_WIDTH_32BIT,
-  //       .slot_bit_width = I2S_SLOT_BIT_WIDTH_AUTO,
-  //       .slot_mode = I2S_SLOT_MODE_MONO,
-  //       .slot_mask = I2S_STD_SLOT_LEFT,
-  //       .ws_width = I2S_DATA_BIT_WIDTH_32BIT,
-  //       .ws_pol = false,
-  //       .bit_shift = true,
-  // #if SOC_I2S_HW_VERSION_1
-  //       .msb_right = false,
-  // #else
-  //       .left_align = true,
-  //       .big_endian = false,
-  //       .bit_order_lsb = false,
-  // #endif
-  //   };
-  //   i2s_std_gpio_config_t gpio_cfg_;
   uint32_t sample_rate_ = 0;
 };
 }  // namespace ai_vox

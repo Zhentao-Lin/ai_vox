@@ -35,16 +35,16 @@ class EngineImpl : public Engine {
   EngineImpl();
   ~EngineImpl();
   void SetObserver(std::shared_ptr<Observer> observer) override;
-  void SetTrigger(const gpio_num_t gpio) override;
   void SetOtaUrl(const std::string url) override;
   void ConfigWebsocket(const std::string url, const std::map<std::string, std::string> headers) override;
   void RegisterIotEntity(std::shared_ptr<iot::Entity> entity) override;
   void Start(std::shared_ptr<AudioInputDevice> audio_input_device, std::shared_ptr<AudioOutputDevice> audio_output_device) override;
+  void Advance() override;
 
  private:
   enum class State {
     kIdle,
-    kInited,
+    kInitd,
     kLoadingProtocol,
     kWebsocketConnecting,
     kWebsocketConnectingWithWakeup,
@@ -58,17 +58,15 @@ class EngineImpl : public Engine {
   EngineImpl(const EngineImpl &) = delete;
   EngineImpl &operator=(const EngineImpl &) = delete;
 
-  static void OnButtonClick(void *button_handle, void *usr_data);
   static void OnWebsocketEvent(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 
-  void OnButtonClick();
   void OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void *event_data);
   void OnAudioFrame(FlexArray<uint8_t> &&data);
   void OnJsonData(FlexArray<uint8_t> &&data);
   void OnWebSocketConnected();
   void OnWebSocketDisconnected();
   void OnAudioOutputDataConsumed();
-  void OnTriggered();
+  void AdvanceInternal();
   void OnWakeUp();
 
   void LoadProtocol();
@@ -84,8 +82,6 @@ class EngineImpl : public Engine {
   mutable std::mutex mutex_;
   State state_ = State::kIdle;
   ChatState chat_state_ = ChatState::kIdle;
-  button_dev_t *button_handle_ = nullptr;
-  gpio_num_t trigger_pin_ = GPIO_NUM_0;
   std::shared_ptr<AudioInputDevice> audio_input_device_;
   std::shared_ptr<AudioOutputDevice> audio_output_device_;
   std::shared_ptr<Observer> observer_;

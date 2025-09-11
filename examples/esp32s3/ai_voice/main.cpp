@@ -4,19 +4,19 @@
 #include "ai_vox_engine.h"
 #include "ai_vox_observer.h"
 #include "audio_device/audio_input_device_i2s_std.h"
-#include "audio_device/audio_output_device_i2s_std.h"
 #include "audio_device/audio_input_device_pdm.h"
+#include "audio_device/audio_output_device_i2s_std.h"
+#include "components/espressif/button/button_gpio.h"
+#include "components/espressif/button/iot_button.h"
+#include "components/espressif/esp_audio_codec/esp_audio_simple_dec.h"
+#include "components/espressif/esp_audio_codec/esp_mp3_dec.h"
+#include "components/wifi_configurator/wifi_configurator.h"
+#include "network_config_mode_mp3.h"
+#include "network_connected_mp3.h"
+#include "notification_0_mp3.h"
 
 #ifndef ARDUINO_ESP32S3_DEV
 #error "This example only supports ESP32S3-Dev board."
-#endif
-
-#ifndef WIFI_SSID
-#define WIFI_SSID "unknown"
-#endif
-
-#ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD "unknown"
 #endif
 
 #define AUDIO_INPUT_DEVICE_TYPE_PDM (0)
@@ -25,29 +25,39 @@
 // #define AUDIO_INPUT_DEVICE_TYPE AUDIO_INPUT_DEVICE_TYPE_PDM
 
 namespace {
+/**
+ *  SC_TYPE_ESPTOUCH            protocol: ESPTouch
+ *  SC_TYPE_AIRKISS,            protocol: AirKiss
+ *  SC_TYPE_ESPTOUCH_AIRKISS,   protocol: ESPTouch and AirKiss
+ *  SC_TYPE_ESPTOUCH_V2,        protocol: ESPTouch v2
+ */
+constexpr smartconfig_type_t kSmartConfigType = SC_TYPE_ESPTOUCH_AIRKISS;  // ESPTouch and AirKiss
+
+// Microphone pin configurations
 #if AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_I2S_STD
-constexpr gpio_num_t kMicPinBclk = GPIO_NUM_5;
-constexpr gpio_num_t kMicPinWs = GPIO_NUM_2;
-constexpr gpio_num_t kMicPinDin = GPIO_NUM_4;
+constexpr gpio_num_t kMicPinSck = GPIO_NUM_6;  // SCK (BCK, BCLK): Serial-Data Clock for I²S Interface
+constexpr gpio_num_t kMicPinWs = GPIO_NUM_5;   // WS (WR, WCLK): Serial Data-Word Select for I²S Interface
+constexpr gpio_num_t kMicPinSd = GPIO_NUM_4;   // SD (DIN，DOUT, DI, DO, DATA): Serial-Data Output for I²S Interface
 #elif AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_PDM
-constexpr gpio_num_t kMicPdmClk = GPIO_NUM_47;
-constexpr gpio_num_t kMicPdmDin = GPIO_NUM_48;
+constexpr gpio_num_t kMicPinSck = GPIO_NUM_15;  // SCK (BCK, BCLK): Serial-Data Clock for I²S Interface
+constexpr gpio_num_t kMicPinSd = GPIO_NUM_7;   // SD (DIN，DOUT, DI, DO, DATA): Serial-Data Output for I²S Interface
 #endif
 
-constexpr gpio_num_t kSpeakerPinBclk = GPIO_NUM_13;
-constexpr gpio_num_t kSpeakerPinWs = GPIO_NUM_14;
-constexpr gpio_num_t kSpeakerPinDout = GPIO_NUM_1;
+constexpr gpio_num_t kSpeakerPinSck = GPIO_NUM_9;  // SCK (BCK, BCLK): Serial-Data Clock for I²S Interface
+constexpr gpio_num_t kSpeakerPinWs = GPIO_NUM_10;   // WS (WR, WCLK): Serial Data-Word Select for I²S Interface
+constexpr gpio_num_t kSpeakerPinSd = GPIO_NUM_11;    // SD (DIN，DOUT, DI, DO, DATA): Serial-Data Output for I²S Interface
 
-constexpr gpio_num_t kTriggerPin = GPIO_NUM_0;
-constexpr gpio_num_t kLedPin = GPIO_NUM_6;
+constexpr gpio_num_t kButtonBoot = GPIO_NUM_0;
+constexpr gpio_num_t kLedPin = GPIO_NUM_2;
 
 auto g_observer = std::make_shared<ai_vox::Observer>();
 std::shared_ptr<ai_vox::iot::Entity> g_led_iot_entity;
 std::shared_ptr<ai_vox::iot::Entity> g_speaker_iot_entity;
-auto g_audio_output_device = std::make_shared<ai_vox::AudioOutputDeviceI2sStd>(kSpeakerPinBclk, kSpeakerPinWs, kSpeakerPinDout);
+auto g_audio_output_device = std::make_shared<ai_vox::AudioOutputDeviceI2sStd>(kSpeakerPinSck, kSpeakerPinWs, kSpeakerPinSd);
+button_handle_t g_button_boot_handle = nullptr;
 
 void InitIot() {
-  printf("InitIot\n");
+  printf("init iot\n");
   auto& ai_vox_engine = ai_vox::Engine::GetInstance();
 
   // Speaker
@@ -130,6 +140,112 @@ void InitIot() {
   ai_vox_engine.RegisterIotEntity(g_led_iot_entity);
 }
 
+void PlayMp3(const uint8_t* data, size_t size) {
+  auto ret = esp_mp3_dec_register();
+  if (ret != ESP_AUDIO_ERR_OK) {
+    printf("Failed to register mp3 decoder: %d\n", ret);
+    abort();
+  }
+
+  esp_audio_simple_dec_handle_t decoder = nullptr;
+  esp_audio_simple_dec_cfg_t audio_dec_cfg{
+      .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3,
+      .dec_cfg = nullptr,
+      .cfg_size = 0,
+  };
+  ret = esp_audio_simple_dec_open(&audio_dec_cfg, &decoder);
+  if (ret != ESP_AUDIO_ERR_OK) {
+    printf("Failed to open mp3 decoder: %d\n", ret);
+    abort();
+  }
+  g_audio_output_device->OpenOutput(16000);
+
+  esp_audio_simple_dec_raw_t raw = {
+      .buffer = const_cast<uint8_t*>(data),
+      .len = size,
+      .eos = true,
+      .consumed = 0,
+      .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
+  };
+
+  uint8_t* frame_data = (uint8_t*)malloc(4096);
+  esp_audio_simple_dec_out_t out_frame = {
+      .buffer = frame_data,
+      .len = 4096,
+      .needed_size = 0,
+      .decoded_size = 0,
+  };
+
+  while (raw.len > 0) {
+    const auto ret = esp_audio_simple_dec_process(decoder, &raw, &out_frame);
+    if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+      // Handle output buffer not enough case
+      out_frame.buffer = reinterpret_cast<uint8_t*>(realloc(out_frame.buffer, out_frame.needed_size));
+      if (out_frame.buffer == nullptr) {
+        break;
+      }
+      out_frame.len = out_frame.needed_size;
+      continue;
+    }
+
+    if (ret != ESP_AUDIO_ERR_OK) {
+      break;
+    }
+
+    g_audio_output_device->Write(reinterpret_cast<int16_t*>(out_frame.buffer), out_frame.decoded_size >> 1);
+    raw.len -= raw.consumed;
+    raw.buffer += raw.consumed;
+  }
+
+  free(frame_data);
+
+  g_audio_output_device->CloseOutput();
+  esp_audio_simple_dec_close(decoder);
+  esp_audio_dec_unregister(ESP_AUDIO_TYPE_MP3);
+}
+
+void ConfigureWifi() {
+  printf("configure wifi\n");
+  auto wifi_configurator = std::make_unique<WifiConfigurator>(WiFi, kSmartConfigType);
+
+  ESP_ERROR_CHECK(iot_button_register_cb(
+      g_button_boot_handle,
+      BUTTON_PRESS_DOWN,
+      nullptr,
+      [](void*, void* data) {
+        printf("boot button pressed\n");
+        static_cast<WifiConfigurator*>(data)->StartSmartConfig();
+      },
+      wifi_configurator.get()));
+
+  PlayMp3(kNotification0mp3, sizeof(kNotification0mp3));
+
+  wifi_configurator->Start();
+  while (true) {
+    const auto state = wifi_configurator->WaitStateChanged();
+    if (state == WifiConfigurator::State::kConnecting) {
+      printf("wifi connecting\n");
+    } else if (state == WifiConfigurator::State::kSmartConfiguring) {
+      printf("wifi smart configuring\n");
+      PlayMp3(kNetworkConfigModeMp3, sizeof(kNetworkConfigModeMp3));
+    } else if (state == WifiConfigurator::State::kFinished) {
+      break;
+    }
+  }
+
+  iot_button_unregister_cb(g_button_boot_handle, BUTTON_PRESS_DOWN, nullptr);
+
+  printf("wifi connected\n");
+  printf("- mac address: %s\n", WiFi.macAddress().c_str());
+  printf("- bssid:       %s\n", WiFi.BSSIDstr().c_str());
+  printf("- ssid:        %s\n", WiFi.SSID().c_str());
+  printf("- ip:          %s\n", WiFi.localIP().toString().c_str());
+  printf("- gateway:     %s\n", WiFi.gatewayIP().toString().c_str());
+  printf("- subnet mask: %s\n", WiFi.subnetMask().toString().c_str());
+
+  PlayMp3(kNetworkConnectedMp3, sizeof(kNetworkConnectedMp3));
+}
+
 #ifdef PRINT_HEAP_INFO_INTERVAL
 void PrintMemInfo() {
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
@@ -176,43 +292,55 @@ void PrintMemInfo() {
 
 void setup() {
   Serial.begin(115200);
-  printf("Init\n");
-
-  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
-    WiFi.useStaticBuffers(true);
-  } else {
-    WiFi.useStaticBuffers(false);
-  }
-
-  printf("Connecting to WiFi, ssid: %s, password: %s\n", WIFI_SSID, WIFI_PASSWORD);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    printf("Connecting to WiFi, ssid: %s, password: %s\n", WIFI_SSID, WIFI_PASSWORD);
-  }
-
-  printf("WiFi connected, IP address: %s\n", WiFi.localIP().toString().c_str());
+  printf("setup\n");
 
   pinMode(kLedPin, OUTPUT);
   digitalWrite(kLedPin, LOW);
+
+  printf("init button\n");
+  const button_config_t btn_cfg = {
+      .long_press_time = 1000,
+      .short_press_time = 50,
+  };
+
+  const button_gpio_config_t gpio_cfg = {
+      .gpio_num = kButtonBoot,
+      .active_level = 0,
+      .enable_power_save = false,
+      .disable_pull = false,
+  };
+
+  ESP_ERROR_CHECK(iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &g_button_boot_handle));
+
+  ConfigureWifi();
   InitIot();
 
 #if AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_I2S_STD
-  auto audio_input_device = std::make_shared<ai_vox::AudioInputDeviceI2sStd>(kMicPinBclk, kMicPinWs, kMicPinDin);
+  auto audio_input_device = std::make_shared<ai_vox::AudioInputDeviceI2sStd>(kMicPinSck, kMicPinWs, kMicPinSd);
 #elif AUDIO_INPUT_DEVICE_TYPE == AUDIO_INPUT_DEVICE_TYPE_PDM
-  auto audio_input_device = std::make_shared<ai_vox::PdmAudioInputDevice>(kMicPdmClk, kMicPdmDin);
+  auto audio_input_device = std::make_shared<ai_vox::PdmAudioInputDevice>(kMicPinSck, kMicPinSd);
 #endif
 
   auto& ai_vox_engine = ai_vox::Engine::GetInstance();
   ai_vox_engine.SetObserver(g_observer);
-  ai_vox_engine.SetTrigger(kTriggerPin);
   ai_vox_engine.SetOtaUrl("https://api.tenclass.net/xiaozhi/ota/");
   ai_vox_engine.ConfigWebsocket("wss://api.tenclass.net/xiaozhi/v1/",
                                 {
                                     {"Authorization", "Bearer test-token"},
                                 });
+  printf("engine starting\n");
   ai_vox_engine.Start(audio_input_device, g_audio_output_device);
-  printf("AI Vox engine started\n");
+  printf("engine started\n");
+
+  ESP_ERROR_CHECK(iot_button_register_cb(
+      g_button_boot_handle,
+      BUTTON_PRESS_DOWN,
+      nullptr,
+      [](void* button_handle, void* usr_data) {
+        printf("boot button pressed\n");
+        ai_vox::Engine::GetInstance().Advance();
+      },
+      nullptr));
 }
 
 void loop() {

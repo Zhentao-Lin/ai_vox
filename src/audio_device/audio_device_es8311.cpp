@@ -22,7 +22,7 @@ AudioDeviceEs8311::AudioDeviceEs8311(const i2c_master_bus_handle_t i2c_master_bu
   i2s_chan_config_t chan_cfg = {
       .id = I2S_NUM_0,
       .role = I2S_ROLE_MASTER,
-      .dma_desc_num = 6,
+      .dma_desc_num = 4,
       .dma_frame_num = 240,
       .auto_clear_after_cb = true,
       .auto_clear_before_cb = false,
@@ -50,9 +50,6 @@ AudioDeviceEs8311::AudioDeviceEs8311(const i2c_master_bus_handle_t i2c_master_bu
                   },
           },
   };
-
-  // std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-  // std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
 
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle_, &std_cfg));
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &std_cfg));

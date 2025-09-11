@@ -32,7 +32,7 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
   }
 
   uint32_t stack_size = 32 << 10;
-  opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(1));
+  opus_encoder_ctl(opus_encoder_, OPUS_SET_DTX(0));
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0) {
     opus_encoder_ctl(opus_encoder_, OPUS_SET_COMPLEXITY(0));
     opus_encoder_ctl(opus_encoder_, OPUS_SET_BITRATE(8000));
@@ -42,16 +42,10 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
   }
   CLOGI();
 
-  // audio_input_device_->Open(kDefaultSampleRate);
   audio_input_device_->OpenInput(kDefaultSampleRate);
   CLOGI();
 
   if (audio_input_device_->input_sample_rate() != kDefaultSampleRate) {
-    // CLOGI("kDefaultSampleRate: %" PRIu32, kDefaultSampleRate);
-    // CLOGI("audio_input_device->input_sample_rate(): %" PRIu32, audio_input_device_->input_sample_rate());
-    // silk_resampler_ = new silk_resampler_state_struct;
-    // silk_resampler_init(
-    //     reinterpret_cast<silk_resampler_state_struct *>(silk_resampler_), audio_input_device_->input_sample_rate(), kDefaultSampleRate, 1);
     resampler_ = std::make_unique<SilkResampler>(audio_input_device_->input_sample_rate(), kDefaultSampleRate);
   }
   CLOGI();
