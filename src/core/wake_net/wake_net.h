@@ -7,8 +7,8 @@
 #include <memory>
 
 #include "audio_device/audio_input_device.h"
+#include "components/task_queue/active_task_queue.h"
 #include "core/flex_array/flex_array.h"
-#include "core/task_queue/task_queue.h"
 
 struct esp_afe_sr_data_t;
 class SilkResampler;
@@ -29,8 +29,8 @@ class WakeNet {
 
   std::function<void()> handler_;
   std::shared_ptr<ai_vox::AudioInputDevice> audio_input_device_;
-  TaskQueue* detect_task_ = nullptr;
-  TaskQueue *feed_task_ = nullptr;
+  ActiveTaskQueue* detect_task_ = nullptr;
+  ActiveTaskQueue* feed_task_ = nullptr;
   std::unique_ptr<SilkResampler> resampler_;
   esp_afe_sr_data_t* afe_data_ = nullptr;
 };

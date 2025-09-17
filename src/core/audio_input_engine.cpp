@@ -49,7 +49,7 @@ AudioInputEngine::AudioInputEngine(std::shared_ptr<ai_vox::AudioInputDevice> aud
     resampler_ = std::make_unique<SilkResampler>(audio_input_device_->input_sample_rate(), kDefaultSampleRate);
   }
   CLOGI();
-  task_queue_ = new TaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1);
+  task_queue_ = new ActiveTaskQueue("AudioInput", stack_size, tskIDLE_PRIORITY + 1);
   task_queue_->Enqueue([this, samples = audio_input_device_->input_sample_rate() / 1000 * frame_duration]() { PullData(samples); });
   CLOGI("OK");
 }

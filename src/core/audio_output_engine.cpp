@@ -30,7 +30,7 @@ AudioOutputEngine::AudioOutputEngine(std::shared_ptr<ai_vox::AudioOutputDevice> 
   }
 
   uint32_t stack_size = 9 << 10;
-  task_queue_ = new TaskQueue("AudioOutput", stack_size, tskIDLE_PRIORITY + 1);
+  task_queue_ = new ActiveTaskQueue("AudioOutput", stack_size, tskIDLE_PRIORITY + 1);
   CLOGI("OK");
 }
 

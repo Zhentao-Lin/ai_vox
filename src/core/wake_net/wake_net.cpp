@@ -73,8 +73,8 @@ void WakeNet::Start() {
     resampler_ = std::make_unique<SilkResampler>(audio_input_device_->input_sample_rate(), kSampleRate);
   }
 
-  feed_task_ = new TaskQueue("WakeNetFeed", 8 * 1024, tskIDLE_PRIORITY + 1);
-  detect_task_ = new TaskQueue("WakeNetDetect", 4 * 1024, tskIDLE_PRIORITY + 1);
+  feed_task_ = new ActiveTaskQueue("WakeNetFeed", 8 * 1024, tskIDLE_PRIORITY + 1);
+  detect_task_ = new ActiveTaskQueue("WakeNetDetect", 4 * 1024, tskIDLE_PRIORITY + 1);
 
   feed_task_->Enqueue(
       [this, samples = g_afe_handle.get_feed_chunksize(afe_data_) * g_afe_handle.get_total_channel_num(afe_data_)]() mutable { FeedData(samples); });

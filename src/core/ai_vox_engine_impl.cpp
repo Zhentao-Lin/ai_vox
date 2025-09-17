@@ -1,15 +1,16 @@
 #include "ai_vox_engine_impl.h"
 
 #include <cJSON.h>
+#include <esp_app_desc.h>
 #include <esp_crt_bundle.h>
 #include <esp_mac.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-#include "ai_vox_observer.h"
 #include "audio_input_engine.h"
 #include "audio_output_engine.h"
+#include "components/cjson_util/cjson_util.h"
 #include "fetch_config.h"
 #include "wake_net/wake_net.h"
 
@@ -74,17 +75,6 @@ std::string Uuid() {
   return std::string(uuid_str);
 }
 
-void DeleteCjsonObj(cJSON *obj) {
-  if (obj != nullptr) {
-    cJSON_Delete(obj);
-  }
-}
-
-void CJSONFree(void *obj) {
-  if (obj != nullptr) {
-    cJSON_free(obj);
-  }
-}
 }  // namespace
 
 EngineImpl &EngineImpl::GetInstance() {
@@ -101,7 +91,8 @@ EngineImpl::EngineImpl()
       websocket_headers_{
           {"Authorization", "Bearer test-token"},
       },
-      task_queue_("AiVoxMain", 1024 * 4, tskIDLE_PRIORITY + 1) {
+      task_queue_("AiVoxMain", 1024 * 4, tskIDLE_PRIORITY + 1),
+      network_task_queue_("AiVoxNetwork", 1024 * 4, tskIDLE_PRIORITY + 1, true) {
 }
 
 EngineImpl::~EngineImpl() {
@@ -137,12 +128,12 @@ void EngineImpl::ConfigWebsocket(const std::string url, const std::map<std::stri
   }
 }
 
-void EngineImpl::RegisterIotEntity(std::shared_ptr<iot::Entity> entity) {
+void EngineImpl::AddMcpTool(std::string name, std::string description, std::map<std::string, ParamSchemaVariant> attributes) {
   std::lock_guard lock(mutex_);
   if (state_ != State::kIdle) {
     return;
   }
-  iot_manager_.RegisterEntity(std::move(entity));
+  mcp_tool_manager_.AddTool(std::move(name), mcp::Tool(std::move(description), std::move(attributes)));
 }
 
 void EngineImpl::Start(std::shared_ptr<AudioInputDevice> audio_input_device, std::shared_ptr<AudioOutputDevice> audio_output_device) {
@@ -159,20 +150,6 @@ void EngineImpl::Start(std::shared_ptr<AudioInputDevice> audio_input_device, std
   wake_net_->Start();
 #endif
 
-  // button_config_t btn_cfg = {
-  //     .long_press_time = 1000,
-  //     .short_press_time = 50,
-  // };
-
-  // button_gpio_config_t gpio_cfg = {
-  //     .gpio_num = trigger_pin_,
-  //     .active_level = 0,
-  //     .enable_power_save = false,
-  //     .disable_pull = false,
-  // };
-
-  // ESP_ERROR_CHECK(iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &button_handle_));
-  // ESP_ERROR_CHECK(iot_button_register_cb(button_handle_, BUTTON_SINGLE_CLICK, nullptr, OnButtonClick, this));
   esp_websocket_client_config_t websocket_cfg;
   memset(&websocket_cfg, 0, sizeof(websocket_cfg));
   websocket_cfg.uri = websocket_url_.c_str();
@@ -193,8 +170,9 @@ void EngineImpl::Start(std::shared_ptr<AudioInputDevice> audio_input_device, std
   esp_websocket_client_append_header(web_socket_client_, "Client-Id", uuid_.c_str());
   esp_websocket_register_events(web_socket_client_, WEBSOCKET_EVENT_ANY, &EngineImpl::OnWebsocketEvent, this);
 
-  ChangeState(State::kInitd);
-  LoadProtocol();
+  ChangeState(State::kInitted);
+  ChangeState(State::kLoadingProtocol);
+  network_task_queue_.Enqueue([this]() { LoadProtocol(); });
 }
 
 void EngineImpl::Advance() {
@@ -205,17 +183,77 @@ void EngineImpl::Advance() {
   task_queue_.Enqueue([this]() { AdvanceInternal(); });
 }
 
-// void EngineImpl::OnButtonClick(void *button_handle, void *self) {
-//   reinterpret_cast<EngineImpl *>(self)->OnButtonClick();
+// void EngineImpl::Process() {
+//   std::lock_guard lock(mutex_);
+//   if (state_ == State::kIdle) {
+//     return;
+//   }
+//   task_queue_.Process();
 // }
+
+void EngineImpl::SendText(std::string text) {
+  std::lock_guard lock(mutex_);
+  if (state_ == State::kIdle) {
+    return;
+  }
+  SendTextInternal(std::move(text));
+}
+
+void EngineImpl::SendMcpCallResponse(const int64_t id, std::variant<std::string, int64_t, bool> response) {
+  std::lock_guard lock(mutex_);
+  if (state_ == State::kIdle) {
+    return;
+  }
+
+  task_queue_.Enqueue([this, id, response = std::move(response)]() mutable {
+    auto root_json_obj = cjson_util::MakeUnique();
+    // "jsonrpc"
+    cJSON_AddStringToObject(root_json_obj.get(), "jsonrpc", "2.0");
+    // "id"
+    cJSON_AddNumberToObject(root_json_obj.get(), "id", id);
+
+    cJSON *result_json_obj = cJSON_CreateObject();
+    cJSON *content_json_obj = cJSON_CreateArray();
+    cJSON *text_json_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(text_json_obj, "type", "text");
+    if (auto value = std::get_if<std::string>(&response)) {
+      cJSON_AddStringToObject(text_json_obj, "text", value->c_str());
+    } else if (auto value = std::get_if<int64_t>(&response)) {
+      cJSON_AddStringToObject(text_json_obj, "text", std::to_string(*value).c_str());
+    } else if (auto value = std::get_if<bool>(&response)) {
+      cJSON_AddStringToObject(text_json_obj, "text", *value ? "true" : "false");
+    }
+    cJSON_AddItemToArray(content_json_obj, text_json_obj);
+    cJSON_AddItemToObject(result_json_obj, "content", content_json_obj);
+    cJSON_AddBoolToObject(result_json_obj, "isError", false);
+    cJSON_AddItemToObject(root_json_obj.get(), "result", result_json_obj);
+    SendMcpResponse(id, std::move(root_json_obj));
+  });
+}
+
+void EngineImpl::SendMcpCallError(const int64_t id, const std::string error) {
+  std::lock_guard lock(mutex_);
+  if (state_ == State::kIdle) {
+    return;
+  }
+
+  task_queue_.Enqueue([this, id, error = std::move(error)]() mutable {
+    auto root_json_obj = cjson_util::MakeUnique();
+    // "jsonrpc"
+    cJSON_AddStringToObject(root_json_obj.get(), "jsonrpc", "2.0");
+    // "id"
+    cJSON_AddNumberToObject(root_json_obj.get(), "id", id);
+
+    auto error_json_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(error_json_obj, "message", error.c_str());
+    cJSON_AddItemToObject(root_json_obj.get(), "error", error_json_obj);
+    SendMcpResponse(id, std::move(root_json_obj));
+  });
+}
 
 void EngineImpl::OnWebsocketEvent(void *self, esp_event_base_t base, int32_t event_id, void *event_data) {
   reinterpret_cast<EngineImpl *>(self)->OnWebsocketEvent(base, event_id, event_data);
 }
-
-// void EngineImpl::OnButtonClick() {
-//   task_queue_.Enqueue([this]() { AdvanceInternal(); });
-// }
 
 void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void *event_data) {
   esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
@@ -236,6 +274,9 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
     }
     case WEBSOCKET_EVENT_DATA: {
       if (!data->fin) {
+        // TODO:
+        printf("[%s][%d] TODO: fragmented frame\n", __FILE__, __LINE__);
+        vTaskDelay(portMAX_DELAY);
         abort();
       }
 
@@ -243,7 +284,14 @@ void EngineImpl::OnWebsocketEvent(esp_event_base_t base, int32_t event_id, void 
         case kWebsocketTextFrame: {
           FlexArray<uint8_t> frame(data->data_len);
           memcpy(frame.data(), data->data_ptr, data->data_len);
-          task_queue_.Enqueue([this, frame = std::move(frame)]() mutable { OnJsonData(std::move(frame)); });
+          task_queue_.Enqueue([this, frame = std::move(frame)]() mutable {
+            if (observer_) {
+              observer_->PushEvent(TextReceivedEvent{
+                  .content = std::string(reinterpret_cast<const char *>(frame.data()), frame.size()),
+              });
+            }
+            OnJsonData(std::move(frame));
+          });
           break;
         }
         case kWebsocketBinaryFrame: {
@@ -280,155 +328,110 @@ void EngineImpl::OnAudioFrame(FlexArray<uint8_t> &&data) {
 }
 
 void EngineImpl::OnJsonData(FlexArray<uint8_t> &&data) {
-  std::unique_ptr<cJSON, decltype(&DeleteCjsonObj)> root_obj(cJSON_ParseWithLength(reinterpret_cast<const char *>(data.data()), data.size()),
-                                                             &DeleteCjsonObj);
+  CLOGI("%.*s", static_cast<int>(data.size()), data.data());
 
-  if (!cJSON_IsObject(root_obj.get())) {
+  auto root_json_obj = cjson_util::MakeUnique(cJSON_ParseWithLength(reinterpret_cast<const char *>(data.data()), data.size()));
+
+  if (!cJSON_IsObject(root_json_obj.get())) {
     CLOGE("Invalid JSON data");
     return;
   }
 
-  std::string type;
-  auto *type_json = cJSON_GetObjectItem(root_obj.get(), "type");
-  if (cJSON_IsString(type_json)) {
-    type = type_json->valuestring;
-  } else {
-    CLOGE("Missing or invalid 'type' field in JSON data");
+  auto type = cjson_util::GetString(root_json_obj.get(), "type");
+  if (!type) {
+    CLOGE("missing or invalid 'type' field in JSON data");
     return;
   }
-  CLOGI("Received JSON type: %s", type.c_str());
+  CLOGI("got type: %s", type->c_str());
 
-  if (type == "hello") {
+  if (*type == "hello") {
     const auto state = state_;
     if (state_ != State::kWebsocketConnected && state_ != State::kWebsocketConnectedWithWakeup) {
       CLOGE("Invalid state: %u", state_);
       return;
     }
 
-    auto session_id_json = cJSON_GetObjectItem(root_obj.get(), "session_id");
-    if (cJSON_IsString(session_id_json)) {
-      session_id_ = session_id_json->valuestring;
-      CLOGI("Session ID: %s", session_id_.c_str());
+    if (auto session_id = cjson_util::GetString(root_json_obj.get(), "session_id")) {
+      session_id_ = std::move(*session_id);
+      CLOGI("got session id: %s", session_id_.c_str());
     }
 
-    SendIotDescriptions();
-    SendIotUpdatedStates(true);
     StartListening();
 
     if (state == State::kWebsocketConnectedWithWakeup) {
-      std::unique_ptr<cJSON, decltype(&DeleteCjsonObj)> message_obj(cJSON_CreateObject(), &DeleteCjsonObj);
-      cJSON_AddStringToObject(message_obj.get(), "session_id", session_id_.c_str());
-      cJSON_AddStringToObject(message_obj.get(), "type", "listen");
-      cJSON_AddStringToObject(message_obj.get(), "state", "detect");
-      cJSON_AddStringToObject(message_obj.get(), "text", "你好小智");
-      auto json_str = cJSON_PrintUnformatted(message_obj.get());
-      CLOGI("Sending JSON: %s", json_str);
-      esp_websocket_client_send_text(web_socket_client_, json_str, strlen(json_str), pdMS_TO_TICKS(5000));
+      auto message_json_obj = cjson_util::MakeUnique();
+      cJSON_AddStringToObject(message_json_obj.get(), "session_id", session_id_.c_str());
+      cJSON_AddStringToObject(message_json_obj.get(), "type", "listen");
+      cJSON_AddStringToObject(message_json_obj.get(), "state", "detect");
+      cJSON_AddStringToObject(message_json_obj.get(), "text", "你好小智");
+      SendTextInternal(cjson_util::ToString(message_json_obj));
     }
-  } else if (type == "goodbye") {
-    auto session_id_json = cJSON_GetObjectItem(root_obj.get(), "session_id");
-    std::string session_id;
-    if (cJSON_IsString(session_id_json)) {
-      if (session_id_ != session_id_json->valuestring) {
+  } else if (*type == "goodbye") {
+    CLOGI("goodbye");
+    if (const auto session_id = cjson_util::GetString(root_json_obj.get(), "session_id")) {
+      CLOGI("session id: %s, current session id: %s", session_id->c_str(), session_id_.c_str());
+      if (session_id_ != *session_id) {
+        CLOGW("session id mismatch, ignoring goodbye, session id: %s, current session id: %s", session_id->c_str(), session_id_.c_str());
         return;
       }
     }
-  } else if (type == "tts") {
-    auto *state_json = cJSON_GetObjectItem(root_obj.get(), "state");
-    if (cJSON_IsString(state_json)) {
-      if (strcmp("start", state_json->valuestring) == 0) {
-        CLOGI("tts start");
+  } else if (*type == "tts") {
+    const auto tts_state = cjson_util::GetString(root_json_obj.get(), "state");
+    if (!tts_state) {
+      CLOGE("missing or invalid 'state' field in JSON data");
+      return;
+    }
+    CLOGI("tts/%s", tts_state->c_str());
+    if (tts_state == "start") {
+      if (state_ == State::kSpeaking) {
+        CLOGW("already in speaking");
+        return;
+      } else if (state_ != State::kListening) {
+        CLOGW("on tts start in invalid state: %u", state_);
+        return;
+      }
 
-        if (state_ == State::kSpeaking) {
-          CLOGI("already speaking");
-          return;
-        } else if (state_ != State::kListening) {
-          CLOGW("invalid state: %u", state_);
-          return;
-        }
-
-        audio_input_engine_.reset();
-        transmit_queue_.reset();
+      audio_input_engine_.reset();
 #ifdef ARDUINO_ESP32S3_DEV
-        wake_net_->Start();
+      wake_net_->Start();
 #endif
-        audio_output_engine_ = std::make_shared<AudioOutputEngine>(audio_output_device_, audio_frame_duration_);
-        ChangeState(State::kSpeaking);
-      } else if (strcmp("stop", state_json->valuestring) == 0) {
-        CLOGI("tts stop");
-        if (audio_output_engine_) {
-          audio_output_engine_->NotifyDataEnd([this]() { task_queue_.Enqueue([this]() { OnAudioOutputDataConsumed(); }); });
-        }
-      } else if (strcmp("sentence_start", state_json->valuestring) == 0) {
-        auto text = cJSON_GetObjectItem(root_obj.get(), "text");
-        if (text != nullptr) {
-          CLOGI("<< %s", text->valuestring);
-          if (observer_) {
-            observer_->PushEvent(Observer::ChatMessageEvent{ChatRole::kAssistant, text->valuestring});
-          }
-        }
-      } else if (strcmp("sentence_end", state_json->valuestring) == 0) {
-        // TODO:
+      audio_output_engine_ = std::make_shared<AudioOutputEngine>(audio_output_device_, audio_frame_duration_);
+      ChangeState(State::kSpeaking);
+    } else if (tts_state == "stop") {
+      if (audio_output_engine_) {
+        audio_output_engine_->NotifyDataEnd([this]() { task_queue_.Enqueue([this]() { OnAudioOutputDataConsumed(); }); });
       }
-    }
-  } else if (type == "stt") {
-    auto text = cJSON_GetObjectItem(root_obj.get(), "text");
-    if (text != nullptr) {
-      CLOGI(">> %s", text->valuestring);
+    } else if (tts_state == "sentence_start") {
+      auto text = cjson_util::GetString(root_json_obj.get(), "text");
+      if (text) {
+        CLOGI("<< %s", text->c_str());
+      }
       if (observer_) {
-        observer_->PushEvent(Observer::ChatMessageEvent{ChatRole::kUser, text->valuestring});
+        observer_->PushEvent(ChatMessageEvent{ChatRole::kAssistant, std::move(*text)});
       }
+    } else if (tts_state == "sentence_end") {
+      // Do nothing
     }
-  } else if (type == "llm") {
-    auto emotion = cJSON_GetObjectItem(root_obj.get(), "emotion");
-    if (cJSON_IsString(emotion)) {
-      CLOGI("emotion: %s", emotion->valuestring);
+  } else if (*type == "stt") {
+    auto text = cjson_util::GetString(root_json_obj.get(), "text");
+    if (text) {
+      CLOGI(">> %s", text->c_str());
       if (observer_) {
-        observer_->PushEvent(Observer::EmotionEvent{emotion->valuestring});
+        observer_->PushEvent(ChatMessageEvent{ChatRole::kUser, std::move(*text)});
       }
     }
-  } else if (type == "iot") {
-    auto commands = cJSON_GetObjectItem(root_obj.get(), "commands");
-    if (cJSON_IsArray(commands)) {
-      auto count = cJSON_GetArraySize(commands);
-      for (size_t i = 0; i < count; ++i) {
-        auto *command = cJSON_GetArrayItem(commands, i);
-        if (!cJSON_IsObject(command)) {
-          continue;
-        }
-
-        auto *name_json = cJSON_GetObjectItem(command, "name");
-        auto *method_json = cJSON_GetObjectItem(command, "method");
-        auto *parameters_json = cJSON_GetObjectItem(command, "parameters");
-
-        if (!cJSON_IsString(name_json) || !cJSON_IsString(method_json) || !cJSON_IsObject(parameters_json)) {
-          continue;
-        }
-
-        std::string name = name_json->valuestring;
-        std::string method = method_json->valuestring;
-        std::map<std::string, iot::Value> parameters;
-        auto *parameter = parameters_json->child;
-        while (parameter) {
-          auto *key = parameter->string;
-          auto *value = parameter->valuestring;
-          if (cJSON_IsString(parameter)) {
-            parameters[key] = std::string(value);
-          } else if (cJSON_IsNumber(parameter)) {
-            parameters[key] = static_cast<int64_t>(parameter->valueint);
-          } else if (cJSON_IsBool(parameter)) {
-            parameters[key] = static_cast<bool>(parameter->valueint);
-          }
-          parameter = parameter->next;
-        }
-        auto iot_message = Observer::IotMessageEvent{name, method, parameters};
-        if (observer_) {
-          observer_->PushEvent(iot_message);
-        }
+  } else if (*type == "llm") {
+    auto emotion = cjson_util::GetString(root_json_obj.get(), "emotion");
+    if (emotion) {
+      CLOGI("emotion: %s", emotion->c_str());
+      if (observer_) {
+        observer_->PushEvent(EmotionEvent{std::move(*emotion)});
       }
     }
+  } else if (*type == "mcp") {
+    OnMcpJsonObj(cJSON_GetObjectItem(root_json_obj.get(), "payload"));
   } else {
-    CLOGE("Unknown JSON type: %s", type.c_str());
+    CLOGE("unknown type: %s", type->c_str());
   }
 }
 
@@ -443,28 +446,116 @@ void EngineImpl::OnWebSocketConnected() {
     return;
   }
 
-  std::unique_ptr<cJSON, decltype(&DeleteCjsonObj)> root_obj(cJSON_CreateObject(), &DeleteCjsonObj);
-  cJSON_AddStringToObject(root_obj.get(), "type", "hello");
-  cJSON_AddNumberToObject(root_obj.get(), "version", 1);
-  cJSON_AddStringToObject(root_obj.get(), "transport", "websocket");
+  auto root_json_obj = cjson_util::MakeUnique();
+  cJSON_AddStringToObject(root_json_obj.get(), "type", "hello");
+  cJSON_AddNumberToObject(root_json_obj.get(), "version", 1);
+  cJSON_AddStringToObject(root_json_obj.get(), "transport", "websocket");
+
+  // features
+  auto const features_obj = cJSON_CreateObject();
+  // mcp:true
+  cJSON_AddBoolToObject(features_obj, "mcp", true);
+  cJSON_AddItemToObject(root_json_obj.get(), "features", features_obj);
 
   auto const audio_params_obj = cJSON_CreateObject();
   cJSON_AddStringToObject(audio_params_obj, "format", "opus");
   cJSON_AddNumberToObject(audio_params_obj, "sample_rate", 16000);
   cJSON_AddNumberToObject(audio_params_obj, "channels", 1);
   cJSON_AddNumberToObject(audio_params_obj, "frame_duration", audio_frame_duration_);
-  cJSON_AddItemToObject(root_obj.get(), "audio_params", audio_params_obj);
+  cJSON_AddItemToObject(root_json_obj.get(), "audio_params", audio_params_obj);
+  SendTextInternal(cjson_util::ToString(root_json_obj));
+}
 
-  std::unique_ptr<char, decltype(&CJSONFree)> text(cJSON_PrintUnformatted(root_obj.get()), &CJSONFree);
-  const auto length = strlen(text.get());
-  CLOGI("sending text: %.*s", static_cast<int>(length), text.get());
-  esp_websocket_client_send_text(web_socket_client_, text.get(), length, pdMS_TO_TICKS(5000));
+void EngineImpl::OnMcpJsonObj(cJSON *root_json_obj) {
+  CLOGI("%s", cjson_util::ToString(root_json_obj).c_str());
+
+  if (!cJSON_IsObject(root_json_obj)) {
+    return;
+  }
+
+  // "jsonrpc":"2.0"
+  if (const auto jsonrpc = cjson_util::GetString(root_json_obj, "jsonrpc")) {
+    CLOGI("jsonrpc: %s", jsonrpc.value().c_str());
+    if (jsonrpc != "2.0") {
+      CLOGE("invalid jsonrpc: %s", jsonrpc.value().c_str());
+      return;
+    }
+  } else {
+    CLOGE("jsonrpc is null");
+    return;
+  }
+
+  // "id":int
+  const auto id = cjson_util::GetNumber(root_json_obj, "id");
+  CLOGI("id: %s", id ? std::to_string(id.value()).c_str() : "null");
+
+  // "method": str
+  const auto method = cjson_util::GetString(root_json_obj, "method");
+  CLOGI("method: %s", method ? method.value().c_str() : "null");
+  if (!method) {
+    CLOGE("method is null");
+    return;
+  }
+
+  if (*method == "initialize") {
+    const auto app_desc = esp_app_get_description();
+    auto response_json_obj = cjson_util::MakeUnique();
+    cJSON_AddStringToObject(response_json_obj.get(), "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(response_json_obj.get(), "id", id.value());
+
+    auto result_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(result_obj, "protocolVersion", "2024-11-05");
+
+    auto capabilities_obj = cJSON_CreateObject();
+    auto tools_obj = cJSON_CreateObject();
+    cJSON_AddItemToObject(capabilities_obj, "tools", tools_obj);
+    cJSON_AddItemToObject(result_obj, "capabilities", capabilities_obj);
+
+    auto server_info_obj = cJSON_CreateObject();
+    cJSON_AddStringToObject(server_info_obj, "name", "ai-vox");
+    cJSON_AddStringToObject(server_info_obj, "version", app_desc->version);
+    cJSON_AddItemToObject(result_obj, "serverInfo", server_info_obj);
+    cJSON_AddItemToObject(response_json_obj.get(), "result", result_obj);
+
+    // auto const reply_text = cjson_util::ToString(reply_obj);
+    SendMcpResponse(id.value(), std::move(response_json_obj));
+  } else if (*method == "tools/list") {
+    auto response_json_obj = cjson_util::MakeUnique();
+    cJSON_AddStringToObject(response_json_obj.get(), "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(response_json_obj.get(), "id", id.value());
+    cJSON_AddItemToObject(response_json_obj.get(), "result", mcp_tool_manager_.ToJson().release());
+    SendMcpResponse(id.value(), std::move(response_json_obj));
+  } else if (*method == "tools/call") {
+    auto params_json_obj = cJSON_GetObjectItem(root_json_obj, "params");
+    auto name = cjson_util::GetString(params_json_obj, "name");
+    if (!name) {
+      CLOGE("name of params is null");
+      return;
+    }
+
+    const auto arguments_json_obj = cJSON_GetObjectItem(params_json_obj, "arguments");
+    std::map<std::string, std::variant<std::string, int64_t, bool>> params;
+    if (cJSON_IsObject(arguments_json_obj)) {
+      for (cJSON *item = arguments_json_obj->child; item != nullptr; item = item->next) {
+        if (cJSON_IsString(item)) {
+          params[item->string] = item->valuestring;
+        } else if (cJSON_IsBool(item)) {
+          params[item->string] = item->valueint != 0;
+        } else if (cJSON_IsNumber(item)) {
+          params[item->string] = item->valueint;
+        }
+      }
+    }
+
+    if (observer_) {
+      observer_->PushEvent(McpToolCallEvent{*id, *name, std::move(params)});
+    }
+  }
 }
 
 void EngineImpl::OnWebSocketDisconnected() {
   CLOGI();
   audio_input_engine_.reset();
-  transmit_queue_.reset();
   audio_output_engine_.reset();
   esp_websocket_client_close(web_socket_client_, pdMS_TO_TICKS(5000));
 
@@ -480,15 +571,16 @@ void EngineImpl::OnAudioOutputDataConsumed() {
     CLOGD("invalid state: %u", state_);
     return;
   }
-  SendIotUpdatedStates(false);
   StartListening();
 }
 
 void EngineImpl::AdvanceInternal() {
-  CLOGI();
+  CLOGI("state: %u", state_);
   switch (state_) {
-    case State::kInitd: {
-      LoadProtocol();
+    case State::kInitted:
+    case State::kLoadingProtocolFailed: {
+      ChangeState(State::kLoadingProtocol);
+      network_task_queue_.Enqueue([this]() { LoadProtocol(); });
       break;
     }
     case State::kStandby: {
@@ -514,8 +606,10 @@ void EngineImpl::AdvanceInternal() {
 void EngineImpl::OnWakeUp() {
   CLOGI();
   switch (state_) {
-    case State::kInitd: {
-      LoadProtocol();
+    case State::kInitted:
+    case State::kLoadingProtocolFailed: {
+      ChangeState(State::kLoadingProtocol);
+      network_task_queue_.Enqueue([this]() { LoadProtocol(); });
       break;
     }
     case State::kStandby: {
@@ -534,20 +628,15 @@ void EngineImpl::OnWakeUp() {
   }
 }
 
-void EngineImpl::LoadProtocol() {
-  CLOGI();
-  if (state_ != State::kInitd) {
-    CLOGI("invalid state: %u", state_);
+void EngineImpl::OnLoadProtocol(const std::shared_ptr<Config> config) {
+  if (state_ != State::kLoadingProtocol) {
+    CLOGW("invalid state: %u", state_);
     return;
   }
 
-  ChangeState(State::kLoadingProtocol);
-
-  auto config = GetConfigFromServer(ota_url_, uuid_);
-
-  if (!config.has_value()) {
-    CLOGE("GetConfigFromServer failed");
-    ChangeState(State::kInitd);
+  if (!config) {
+    CLOGD("message is null");
+    ChangeState(State::kLoadingProtocolFailed);
     return;
   }
 
@@ -563,14 +652,19 @@ void EngineImpl::LoadProtocol() {
 
   if (!config->activation.code.empty()) {
     if (observer_) {
-      observer_->PushEvent(Observer::ActivationEvent{config->activation.code, config->activation.message});
+      observer_->PushEvent(ActivationEvent{config->activation.code, config->activation.message});
     }
-    ChangeState(State::kInitd);
+    ChangeState(State::kInitted);
     return;
   }
 
   ChangeState(State::kStandby);
-  return;
+}
+
+void EngineImpl::LoadProtocol() {
+  CLOGI();
+  auto config = GetConfigFromServer(ota_url_, uuid_);
+  task_queue_.Enqueue([this, config = std::move(config)]() mutable { OnLoadProtocol(config); });
 }
 
 void EngineImpl::StartListening() {
@@ -579,29 +673,25 @@ void EngineImpl::StartListening() {
     return;
   }
 
-  std::unique_ptr<cJSON, decltype(&DeleteCjsonObj)> root_obj(cJSON_CreateObject(), &DeleteCjsonObj);
-  cJSON_AddStringToObject(root_obj.get(), "session_id", session_id_.c_str());
-  cJSON_AddStringToObject(root_obj.get(), "type", "listen");
-  cJSON_AddStringToObject(root_obj.get(), "state", "start");
-  cJSON_AddStringToObject(root_obj.get(), "mode", "auto");
-  std::unique_ptr<char, decltype(&CJSONFree)> text(cJSON_PrintUnformatted(root_obj.get()), &CJSONFree);
-  const auto length = strlen(text.get());
-  CLOGI("sending text: %.*s", static_cast<int>(length), text.get());
-  esp_websocket_client_send_text(web_socket_client_, text.get(), length, pdMS_TO_TICKS(5000));
+  auto root_json_obj = cjson_util::MakeUnique();
+  cJSON_AddStringToObject(root_json_obj.get(), "session_id", session_id_.c_str());
+  cJSON_AddStringToObject(root_json_obj.get(), "type", "listen");
+  cJSON_AddStringToObject(root_json_obj.get(), "state", "start");
+  cJSON_AddStringToObject(root_json_obj.get(), "mode", "auto");
+  SendTextInternal(cjson_util::ToString(root_json_obj));
 
   audio_output_engine_.reset();
 #ifdef ARDUINO_ESP32S3_DEV
   wake_net_->Stop();
 #endif
-  transmit_queue_ = std::make_unique<TaskQueue>("AiVoxTransmit", 1024 * 3, tskIDLE_PRIORITY + 2);
   audio_input_engine_ = std::make_shared<AudioInputEngine>(
       audio_input_device_,
       [this](FlexArray<uint8_t> &&data) mutable {
-        if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0 && transmit_queue_->Size() > 5) {
+        if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) == 0 && network_task_queue_.size() > 5) {
           return;
         }
 
-        transmit_queue_->Enqueue([this, data = std::move(data)]() mutable {
+        network_task_queue_.Enqueue([this, data = std::move(data)]() mutable {
           if (esp_websocket_client_is_connected(web_socket_client_)) {
             const auto start_time = esp_timer_get_time();
             if (data.size() !=
@@ -611,7 +701,7 @@ void EngineImpl::StartListening() {
 
             const auto elapsed_time = esp_timer_get_time() - start_time;
             if (elapsed_time > 100 * 1000) {
-              CLOGW("Network latency high: %lld ms, data size: %zu bytes, poor network condition detected", elapsed_time / 1000, data.size());
+              CLOGW("network latency high: %lld ms, data size: %zu bytes, poor network condition detected", elapsed_time / 1000, data.size());
             }
           }
         });
@@ -626,14 +716,10 @@ void EngineImpl::AbortSpeaking() {
     return;
   }
 
-  std::unique_ptr<cJSON, decltype(&DeleteCjsonObj)> root_obj(cJSON_CreateObject(), &DeleteCjsonObj);
-  cJSON_AddStringToObject(root_obj.get(), "session_id", session_id_.c_str());
-  cJSON_AddStringToObject(root_obj.get(), "type", "abort");
-  std::unique_ptr<char, decltype(&CJSONFree)> text(cJSON_PrintUnformatted(root_obj.get()), &CJSONFree);
-  const auto length = strlen(text.get());
-  CLOGI("sending text: %.*s", static_cast<int>(length), text.get());
-  esp_websocket_client_send_text(web_socket_client_, text.get(), length, pdMS_TO_TICKS(5000));
-  CLOGI("OK");
+  auto root_json_obj = cjson_util::MakeUnique();
+  cJSON_AddStringToObject(root_json_obj.get(), "session_id", session_id_.c_str());
+  cJSON_AddStringToObject(root_json_obj.get(), "type", "abort");
+  SendTextInternal(cjson_util::ToString(root_json_obj));
 }
 
 void EngineImpl::AbortSpeaking(const std::string &reason) {
@@ -642,14 +728,11 @@ void EngineImpl::AbortSpeaking(const std::string &reason) {
     return;
   }
 
-  std::unique_ptr<cJSON, decltype(&DeleteCjsonObj)> root_obj(cJSON_CreateObject(), &DeleteCjsonObj);
-  cJSON_AddStringToObject(root_obj.get(), "session_id", session_id_.c_str());
-  cJSON_AddStringToObject(root_obj.get(), "type", "abort");
-  cJSON_AddStringToObject(root_obj.get(), "reason", reason.c_str());
-  std::unique_ptr<char, decltype(&CJSONFree)> text(cJSON_PrintUnformatted(root_obj.get()), &CJSONFree);
-  const auto length = strlen(text.get());
-  CLOGI("sending text: %.*s", static_cast<int>(length), text.get());
-  esp_websocket_client_send_text(web_socket_client_, text.get(), length, pdMS_TO_TICKS(5000));
+  auto root_json_obj = cjson_util::MakeUnique();
+  cJSON_AddStringToObject(root_json_obj.get(), "session_id", session_id_.c_str());
+  cJSON_AddStringToObject(root_json_obj.get(), "type", "abort");
+  cJSON_AddStringToObject(root_json_obj.get(), "reason", reason.c_str());
+  SendTextInternal(cjson_util::ToString(root_json_obj));
 }
 
 bool EngineImpl::ConnectWebSocket() {
@@ -666,7 +749,6 @@ bool EngineImpl::ConnectWebSocket() {
 
 void EngineImpl::DisconnectWebSocket() {
   audio_input_engine_.reset();
-  transmit_queue_.reset();
   audio_output_engine_.reset();
 #ifdef ARDUINO_ESP32S3_DEV
   wake_net_->Start();
@@ -674,31 +756,29 @@ void EngineImpl::DisconnectWebSocket() {
   esp_websocket_client_close(web_socket_client_, pdMS_TO_TICKS(5000));
 }
 
-void EngineImpl::SendIotDescriptions() {
-  const auto descirptions = iot_manager_.DescriptionsJson();
-  for (const auto &descirption : descirptions) {
-    CLOGI("sending text: %.*s", static_cast<int>(descirption.size()), descirption.c_str());
-    const auto ret = esp_websocket_client_send_text(web_socket_client_, descirption.c_str(), descirption.size(), pdMS_TO_TICKS(5000));
-    if (ret != descirption.size()) {
-      CLOGE("sending failed");
-    } else {
-      CLOGD("sending ok");
+void EngineImpl::SendTextInternal(std::string text) {
+  network_task_queue_.Enqueue([this, text = std::move(text)]() mutable {
+    if (esp_websocket_client_is_connected(web_socket_client_)) {
+      const auto start_time = esp_timer_get_time();
+      auto ret = esp_websocket_client_send_text(web_socket_client_, text.c_str(), text.length(), pdMS_TO_TICKS(10000));
+      const auto elapsed_time = esp_timer_get_time() - start_time;
+      if (ret != text.length()) {
+        CLOGE("sending text failed, expected: %zu bytes, actual: %d bytes", text.length(), ret);
+      }
+      if (elapsed_time > 100 * 1000) {
+        CLOGW("network latency high: %lld ms, data size: %zu bytes, poor network condition detected", elapsed_time / 1000, text.length());
+      }
     }
-  }
+  });
 }
 
-void EngineImpl::SendIotUpdatedStates(const bool force) {
-  CLOGD("force: %d", force);
-  const auto updated_states = iot_manager_.UpdatedJson(force);
-  for (const auto &updated_state : updated_states) {
-    CLOGI("sending text: %.*s", static_cast<int>(updated_state.size()), updated_state.c_str());
-    const auto ret = esp_websocket_client_send_text(web_socket_client_, updated_state.c_str(), updated_state.size(), pdMS_TO_TICKS(5000));
-    if (ret != updated_state.size()) {
-      CLOGE("sending failed");
-    } else {
-      CLOGD("sending ok");
-    }
-  }
+void EngineImpl::SendMcpResponse(const int64_t id, std::unique_ptr<cJSON, cjson_util::CjsonDeleter> json_obj) {
+  auto root_json_obj = cjson_util::MakeUnique();
+  // session id:
+  cJSON_AddStringToObject(root_json_obj.get(), "session_id", session_id_.c_str());
+  cJSON_AddStringToObject(root_json_obj.get(), "type", "mcp");
+  cJSON_AddItemToObject(root_json_obj.get(), "payload", json_obj.release());
+  SendTextInternal(cjson_util::ToString(root_json_obj));
 }
 
 void EngineImpl::ChangeState(const State new_state) {
@@ -706,10 +786,12 @@ void EngineImpl::ChangeState(const State new_state) {
     switch (state) {
       case State::kIdle:
         return ChatState::kIdle;
-      case State::kInitd:
-        return ChatState::kIniting;
+      case State::kInitted:
+        return ChatState::kInitted;
       case State::kLoadingProtocol:
-        return ChatState::kIniting;
+        return ChatState::kLoading;
+      case State::kLoadingProtocolFailed:
+        return ChatState::kLoadingFailed;
       case State::kWebsocketConnecting:
       case State::kWebsocketConnectingWithWakeup:
         return ChatState::kConnecting;
@@ -730,7 +812,7 @@ void EngineImpl::ChangeState(const State new_state) {
   const auto new_chat_state = convert_state(new_state);
 
   if (new_chat_state != chat_state_ && observer_) {
-    observer_->PushEvent(Observer::StateChangedEvent{chat_state_, new_chat_state});
+    observer_->PushEvent(StateChangedEvent{chat_state_, new_chat_state});
   }
 
   state_ = new_state;

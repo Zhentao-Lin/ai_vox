@@ -1,7 +1,7 @@
 #pragma once
 
-#include <optional>
 #include <string>
+#include <memory>
 
 struct Config {
   struct Mqtt {
@@ -22,4 +22,4 @@ struct Config {
   Activation activation;
 };
 
-std::optional<Config> GetConfigFromServer(const std::string& url, const std::string& uuid);
+std::shared_ptr<Config> GetConfigFromServer(const std::string& url, const std::string& uuid);

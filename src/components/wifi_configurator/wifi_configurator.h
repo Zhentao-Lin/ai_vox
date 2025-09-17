@@ -23,6 +23,7 @@ class WifiConfigurator {
   WifiConfigurator(WiFiClass& wifi, const smartconfig_type_t smartconfig_type);
   ~WifiConfigurator();
   void Start();
+  void Start(const std::string& wifi_ssid, const std::string& wifi_password);
   void StartSmartConfig();
   bool finished() const;
   State WaitStateChanged() const;

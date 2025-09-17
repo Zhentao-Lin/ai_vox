@@ -7,7 +7,6 @@
 #include <esp_lcd_panel_vendor.h>
 
 #include "ai_vox_engine.h"
-#include "ai_vox_observer.h"
 #include "audio_device/audio_output_device_i2s_std.h"
 #include "audio_input_device_sph0645.h"
 #include "components/espressif/button/button_gpio.h"
@@ -28,6 +27,12 @@
 #ifndef CONFIG_SPIRAM_MODE_OCT
 #error "This example requires PSRAM to OPI PSRAM. Please enable it in Arduino IDE."
 #endif
+
+/**
+ * 如果开机自动连接WiFi而不需要配置WiFi, 请注释掉下面的宏, 然后请修改下面的WIFI_SSID和WIFI_PASSWORD
+ */
+// #define WIFI_SSID "your_wifi_ssid"
+// #define WIFI_PASSWORD "your_wifi_password"
 
 namespace {
 /**
@@ -66,15 +71,13 @@ constexpr bool kDisplayInvertColor = true;
 constexpr bool kDisplaySwapXY = false;
 constexpr auto kDisplayRgbElementOrder = LCD_RGB_ELEMENT_ORDER_RGB;
 
-std::shared_ptr<ai_vox::iot::Entity> g_led_iot_entity;
-std::shared_ptr<ai_vox::iot::Entity> g_screen_iot_entity;
-std::shared_ptr<ai_vox::iot::Entity> g_speaker_iot_entity;
 auto g_audio_output_device = std::make_shared<ai_vox::AudioOutputDeviceI2sStd>(kSpeakerPinSck, kSpeakerPinWs, kSpeakerPinSd);
 button_handle_t g_button_boot_handle = nullptr;
 
 std::unique_ptr<Display> g_display;
 auto g_observer = std::make_shared<ai_vox::Observer>();
 
+bool g_led_on = false;
 led_strip_handle_t g_led_strip;
 
 void InitDisplay() {
@@ -151,148 +154,6 @@ void InitLed() {
                                        }};
   ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &g_led_strip));
   ESP_ERROR_CHECK(led_strip_clear(g_led_strip));
-}
-
-void InitIot() {
-  printf("init iot\n");
-
-  auto& ai_vox_engine = ai_vox::Engine::GetInstance();
-
-  // Speaker
-  // 1.Define the properties for the speaker entity
-  std::vector<ai_vox::iot::Property> speaker_properties({
-      {
-          "volume",                        // property name
-          "当前音量值",                    // property description
-          ai_vox::iot::ValueType::kNumber  // property type: number, string or bool
-      },
-      // add more properties as needed
-  });
-
-  // 2.Define the functions for the speaker entity
-  std::vector<ai_vox::iot::Function> speaker_functions({
-      {"SetVolume",  // function name
-       "设置音量",   // function description
-       {
-           {
-               "volume",                         // parameter name
-               "0到100之间的整数",               // parameter description
-               ai_vox::iot::ValueType::kNumber,  // parameter type
-               true                              // parameter required
-           },
-           // add more parameters as needed
-       }},
-      // add more functions as needed
-  });
-
-  // 3.Create the speaker entity
-  g_speaker_iot_entity = std::make_shared<ai_vox::iot::Entity>("Speaker",                      // name
-                                                               "扬声器",                       // description
-                                                               std::move(speaker_properties),  // properties
-                                                               std::move(speaker_functions)    // functions
-  );
-
-  // 4.Initialize the speaker entity with default values
-  g_speaker_iot_entity->UpdateState("volume", g_audio_output_device->volume());
-
-  // 5.Register the speaker entity with the AI Vox engine
-  ai_vox_engine.RegisterIotEntity(g_speaker_iot_entity);
-
-  // LED
-  // 1.Define the properties for the LED entity
-  std::vector<ai_vox::iot::Property> led_properties({
-      {
-          "state",                       // property name
-          "LED灯开关状态",               // property description
-          ai_vox::iot::ValueType::kBool  // property type
-      },
-      // add more properties as needed
-  });
-
-  // 2.Define the functions for the LED entity
-  std::vector<ai_vox::iot::Function> led_functions({
-      {"TurnOn",     // function name
-       "打开LED灯",  // function description
-       {
-           // no parameters
-       }},
-      {"TurnOff",    // function name
-       "关闭LED灯",  // function description
-       {
-           // no parameters
-       }},
-      // add more functions as needed
-  });
-
-  // 3.Create the LED entity
-  g_led_iot_entity = std::make_shared<ai_vox::iot::Entity>("Led",                      // name
-                                                           "LED灯",                    // description
-                                                           std::move(led_properties),  // properties
-                                                           std::move(led_functions)    // functions
-  );
-
-  // 4.Initialize the LED entity with default values
-  g_led_iot_entity->UpdateState("state", false);
-
-  // 5.Register the LED entity with the AI Vox engine
-  ai_vox_engine.RegisterIotEntity(g_led_iot_entity);
-
-  // Screen
-  // 1.Define the properties for the screen entity
-  std::vector<ai_vox::iot::Property> screen_properties({
-      {
-          "theme",                         // property name
-          "主题",                          // property description
-          ai_vox::iot::ValueType::kString  // property type
-      },
-      {
-          "brightness",                    // property name
-          "当前亮度百分比",                // property description
-          ai_vox::iot::ValueType::kNumber  // property type
-      },
-      // add more properties as needed
-  });
-
-  // 2.Define the functions for the screen entity
-  std::vector<ai_vox::iot::Function> screen_functions({
-      {"SetTheme",      // function name
-       "设置屏幕主题",  // function description
-       {
-           {
-               "theme_name",                     // parameter name
-               "主题模式, light 或 dark",        // parameter description
-               ai_vox::iot::ValueType::kString,  // parameter type
-               true                              // parameter required
-           },
-           // add more parameters as needed
-       }},
-      {"SetBrightness",  // function name
-       "设置亮度",       // function description
-       {
-           {
-               "brightness",                     // parameter name
-               "0到100之间的整数",               // parameter description
-               ai_vox::iot::ValueType::kNumber,  // parameter type
-               true                              // parameter required
-           },
-           // add more parameters as needed
-       }},
-      // add more functions as needed
-  });
-
-  // 3.Create the screen entity
-  g_screen_iot_entity = std::make_shared<ai_vox::iot::Entity>("Screen",                          // name
-                                                              "这是一个屏幕，可设置主题和亮度",  // description
-                                                              std::move(screen_properties),      // properties
-                                                              std::move(screen_functions)        // functions
-  );
-
-  // 4.Initialize the screen entity with default values
-  g_screen_iot_entity->UpdateState("theme", "light");
-  g_screen_iot_entity->UpdateState("brightness", 100);
-
-  // 6.Register the screen entity with the AI Vox engine
-  ai_vox_engine.RegisterIotEntity(g_screen_iot_entity);
 }
 
 #ifdef PRINT_HEAP_INFO_INTERVAL
@@ -419,7 +280,14 @@ void ConfigureWifi() {
   g_display->ShowStatus("网络配置中");
   PlayMp3(kNotification0mp3, sizeof(kNotification0mp3));
 
+#if defined(WIFI_SSID) && defined(WIFI_PASSWORD)
+  printf("wifi config start with wifi: %s, %s\n", WIFI_SSID, WIFI_PASSWORD);
+  wifi_configurator->Start(WIFI_SSID, WIFI_PASSWORD);
+#else
+  printf("wifi config start\n");
   wifi_configurator->Start();
+#endif
+
   while (true) {
     const auto state = wifi_configurator->WaitStateChanged();
     if (state == WifiConfigurator::State::kConnecting) {
@@ -446,6 +314,54 @@ void ConfigureWifi() {
 
   g_display->ShowStatus("网络已连接");
   PlayMp3(kNetworkConnectedMp3, sizeof(kNetworkConnectedMp3));
+}
+
+void InitMcpTools() {
+  auto& engine = ai_vox::Engine::GetInstance();
+  engine.AddMcpTool("self.audio_speaker.set_volume",         // tool name
+                    "Set the volume of the audio speaker.",  // tool description
+                    {
+                        {
+                            "volume",  // parameter name
+
+                            ai_vox::ParamSchema<int64_t>{
+                                // parameter type can be bool, std::string or int64_t
+                                .default_value = std::nullopt,  // default value, set to std::nullopt if not specified
+                                .min = 0,                       // minimum value, set to std::nullopt if not specified
+                                .max = 100,                     // maximum value, set to std::nullopt if not specified
+                            },
+                        },
+                        // add more parameter schema as needed
+                    }  // parameter schema
+  );
+
+  engine.AddMcpTool("self.audio_speaker.get_volume",         // tool name
+                    "Get the volume of the audio speaker.",  // tool description
+                    {
+                        // empty
+                    }  // parameter schema
+  );
+
+  engine.AddMcpTool("self.led.set",                                           // tool name
+                    "Set the state of the LED, true for on, false for off.",  // tool description
+                    {
+                        {
+                            "state",  // parameter name
+                            ai_vox::ParamSchema<bool>{
+                                // parameter type can be bool, std::string or int64_t
+                                .default_value = std::nullopt,  // default value, set to std::nullopt if not specified
+                            },                                  // parameter type
+                        },
+                        // add more parameter schema as needed
+                    }  // parameter schema
+  );
+
+  engine.AddMcpTool("self.led.get",                                           // tool name
+                    "Get the state of the LED, true for on, false for off.",  // tool description
+                    {
+                        // empty
+                    }  // parameter schema
+  );
 }
 }  // namespace
 
@@ -482,7 +398,7 @@ void setup() {
 
   g_display->ShowStatus("初始化");
   ConfigureWifi();
-  InitIot();
+  InitMcpTools();
 
   auto audio_input_device = std::make_shared<AudioInputDeviceSph0645>(kMicPinSck, kMicPinWs, kMicPinSd);
   auto& ai_vox_engine = ai_vox::Engine::GetInstance();
@@ -521,21 +437,36 @@ void loop() {
   }
 #endif
 
+  auto& engine = ai_vox::Engine::GetInstance();
+
   const auto events = g_observer->PopEvents();
+
   for (auto& event : events) {
-    if (auto activation_event = std::get_if<ai_vox::Observer::ActivationEvent>(&event)) {
+    if (auto text_received_event = std::get_if<ai_vox::TextReceivedEvent>(&event)) {
+      printf("on text received: %s\n", text_received_event->content.c_str());
+    } else if (auto activation_event = std::get_if<ai_vox::ActivationEvent>(&event)) {
       printf("activation code: %s, message: %s\n", activation_event->code.c_str(), activation_event->message.c_str());
       g_display->ShowStatus("激活设备");
       g_display->SetChatMessage(Display::Role::kSystem, activation_event->message);
-    } else if (auto state_changed_event = std::get_if<ai_vox::Observer::StateChangedEvent>(&event)) {
+    } else if (auto state_changed_event = std::get_if<ai_vox::StateChangedEvent>(&event)) {
       switch (state_changed_event->new_state) {
         case ai_vox::ChatState::kIdle: {
           printf("Idle\n");
           break;
         }
-        case ai_vox::ChatState::kIniting: {
-          printf("Initing...\n");
-          g_display->ShowStatus("初始化");
+        case ai_vox::ChatState::kInitted: {
+          printf("Initted\n");
+          g_display->ShowStatus("初始化完成");
+          break;
+        }
+        case ai_vox::ChatState::kLoading: {
+          printf("Loading...\n");
+          g_display->ShowStatus("加载协议中");
+          break;
+        }
+        case ai_vox::ChatState::kLoadingFailed: {
+          printf("Loading failed, please retry\n");
+          g_display->ShowStatus("加载协议失败，请重试");
           break;
         }
         case ai_vox::ChatState::kStandby: {
@@ -562,10 +493,10 @@ void loop() {
           break;
         }
       }
-    } else if (auto emotion_event = std::get_if<ai_vox::Observer::EmotionEvent>(&event)) {
+    } else if (auto emotion_event = std::get_if<ai_vox::EmotionEvent>(&event)) {
       printf("emotion: %s\n", emotion_event->emotion.c_str());
       g_display->SetEmotion(emotion_event->emotion);
-    } else if (auto chat_message_event = std::get_if<ai_vox::Observer::ChatMessageEvent>(&event)) {
+    } else if (auto chat_message_event = std::get_if<ai_vox::ChatMessageEvent>(&event)) {
       switch (chat_message_event->role) {
         case ai_vox::ChatRole::kAssistant: {
           printf("role: assistant, content: %s\n", chat_message_event->content.c_str());
@@ -578,64 +509,41 @@ void loop() {
           break;
         }
       }
-    } else if (auto iot_message_event = std::get_if<ai_vox::Observer::IotMessageEvent>(&event)) {
-      printf("IOT message: %s, function: %s\n", iot_message_event->name.c_str(), iot_message_event->function.c_str());
-      for (const auto& [key, value] : iot_message_event->parameters) {
-        if (std::get_if<bool>(&value)) {
-          printf("key: %s, value: %s\n", key.c_str(), std::get<bool>(value) ? "true" : "false");
-        } else if (std::get_if<std::string>(&value)) {
-          printf("key: %s, value: %s\n", key.c_str(), std::get<std::string>(value).c_str());
-        } else if (std::get_if<int64_t>(&value)) {
-          printf("key: %s, value: %lld\n", key.c_str(), std::get<int64_t>(value));
-        }
-      }
+    } else if (auto mcp_tool_call_event = std::get_if<ai_vox::McpToolCallEvent>(&event)) {
+      printf("on mcp tool call: %s\n", mcp_tool_call_event->ToString().c_str());
 
-      if (iot_message_event->name == "Led") {
-        if (iot_message_event->function == "TurnOn") {
-          printf("turn on led\n");
-          ESP_ERROR_CHECK(led_strip_set_pixel(g_led_strip, 0, 200, 200, 200));
+      if ("self.audio_speaker.set_volume" == mcp_tool_call_event->name) {
+        const auto volume_ptr = mcp_tool_call_event->param<int64_t>("volume");
+        if (volume_ptr != nullptr) {
+          printf("on mcp tool call: self.audio_speaker.set_volume, volume: %" PRId64 "\n", *volume_ptr);
+          g_audio_output_device->set_volume(*volume_ptr);
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: volume");
+        }
+      } else if ("self.audio_speaker.get_volume" == mcp_tool_call_event->name) {
+        const auto volume = g_audio_output_device->volume();
+        printf("on mcp tool call: self.audio_speaker.get_volume, volume: %" PRIu16 "\n", volume);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, volume);
+      } else if ("self.led.set" == mcp_tool_call_event->name) {
+        const auto state_ptr = mcp_tool_call_event->param<bool>("state");
+        if (state_ptr != nullptr) {
+          printf("on mcp tool call: self.led.set, state: %d\n", *state_ptr);
+          if (*state_ptr) {
+            ESP_ERROR_CHECK(led_strip_set_pixel(g_led_strip, 0, 10, 10, 10));
+          } else {
+            ESP_ERROR_CHECK(led_strip_clear(g_led_strip));
+          }
           ESP_ERROR_CHECK(led_strip_refresh(g_led_strip));
-          g_led_iot_entity->UpdateState("state", true);  //  Note: Must UpdateState after change the device state
-        } else if (iot_message_event->function == "TurnOff") {
-          printf("turn off led\n");
-          ESP_ERROR_CHECK(led_strip_clear(g_led_strip));
-          g_led_iot_entity->UpdateState("state", false);  // Note: Must UpdateState after change the device state
+          g_led_on = *state_ptr;
+          engine.SendMcpCallResponse(mcp_tool_call_event->id, true);
+        } else {
+          engine.SendMcpCallError(mcp_tool_call_event->id, "Missing valid argument: state");
         }
-      } else if (iot_message_event->name == "Screen") {
-        if (iot_message_event->function == "SetTheme") {
-          if (const auto it = iot_message_event->parameters.find("theme_name"); it != iot_message_event->parameters.end()) {
-            auto theme_name = it->second;
-            if (std::get_if<std::string>(&theme_name)) {
-              printf("Screen theme: %s\n", std::get<std::string>(theme_name).c_str());
-              // TODO: Set the theme
-              // g_display->SetTheme(std::get<std::string>(theme_name));
-              g_screen_iot_entity->UpdateState("theme", std::get<std::string>(theme_name));  // Note: Must UpdateState after change the device state
-            }
-          }
-        } else if (iot_message_event->function == "SetBrightness") {
-          if (const auto it = iot_message_event->parameters.find("brightness"); it != iot_message_event->parameters.end()) {
-            auto brightness = it->second;
-            if (std::get_if<int64_t>(&brightness)) {
-              printf("Screen brightness: %lld\n", std::get<int64_t>(brightness));
-              analogWrite(kDisplayBacklightPin, 255 * std::get<int64_t>(brightness) / 100);
-              g_screen_iot_entity->UpdateState("brightness", std::get<int64_t>(brightness));  // Note: Must UpdateState after change the device state
-            }
-          }
-        }
-      } else if (iot_message_event->name == "Speaker") {
-        if (iot_message_event->function == "SetVolume") {
-          if (const auto it = iot_message_event->parameters.find("volume"); it != iot_message_event->parameters.end()) {
-            auto volume = it->second;
-            if (std::get_if<int64_t>(&volume)) {
-              printf("Speaker volume: %lld\n", std::get<int64_t>(volume));
-              g_audio_output_device->set_volume(std::get<int64_t>(volume));
-              g_speaker_iot_entity->UpdateState("volume", std::get<int64_t>(volume));  // Note: Must UpdateState after change the device state
-            }
-          }
-        }
+      } else if ("self.led.get" == mcp_tool_call_event->name) {
+        printf("on mcp tool call: self.led.get, state: %d\n", g_led_on);
+        engine.SendMcpCallResponse(mcp_tool_call_event->id, g_led_on);
       }
     }
   }
-
-  taskYIELD();
 }
