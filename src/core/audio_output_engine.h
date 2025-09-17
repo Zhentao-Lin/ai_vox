@@ -4,8 +4,8 @@
 #include <memory>
 
 #include "audio_device/audio_output_device.h"
+#include "components/task_queue/active_task_queue.h"
 #include "flex_array/flex_array.h"
-#include "task_queue/task_queue.h"
 
 class OpusDecoder;
 class SilkResampler;
@@ -29,6 +29,6 @@ class AudioOutputEngine {
   std::shared_ptr<ai_vox::AudioOutputDevice> audio_output_device_;
   struct OpusDecoder* opus_decoder_ = nullptr;
   std::unique_ptr<SilkResampler> resampler_;
-  TaskQueue* task_queue_ = nullptr;
+  ActiveTaskQueue* task_queue_ = nullptr;
   const uint32_t samples_ = 0;
 };

@@ -7,8 +7,8 @@
 #include <memory>
 
 #include "audio_device//audio_input_device.h"
+#include "components/task_queue/active_task_queue.h"
 #include "flex_array/flex_array.h"
-#include "task_queue/task_queue.h"
 
 struct OpusDecoder;
 class SilkResampler;
@@ -32,7 +32,7 @@ class AudioInputEngine {
   std::shared_ptr<ai_vox::AudioInputDevice> audio_input_device_;
   struct OpusEncoder *opus_encoder_ = nullptr;
   std::unique_ptr<SilkResampler> resampler_;
-  TaskQueue *task_queue_ = nullptr;
+  ActiveTaskQueue *task_queue_ = nullptr;
 };
 
 #endif

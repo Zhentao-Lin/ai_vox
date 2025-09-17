@@ -35,7 +35,11 @@ class AudioOutputDeviceI2sStd : public AudioOutputDevice {
   bool OpenOutput(uint32_t sample_rate) override {
     CloseOutput();
     i2s_chan_config_t tx_chan_cfg = {
+#if SOC_I2S_NUM > 1
         .id = I2S_NUM_1,
+#else
+        .id = I2S_NUM_0,
+#endif
         .role = I2S_ROLE_MASTER,
         .dma_desc_num = 2,
         .dma_frame_num = 480,

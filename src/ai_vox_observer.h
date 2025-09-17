@@ -8,54 +8,15 @@
 #include <string>
 #include <variant>
 
-#include "iot_entity.h"
+#include "ai_vox_types.h"
 
 namespace ai_vox {
 
-enum class ChatState : uint8_t {
-  kIdle,
-  kIniting,
-  kStandby,
-  kConnecting,
-  kListening,
-  kSpeaking,
-};
-
-enum class ChatRole : uint8_t {
-  kAssistant,
-  kUser,
-};
+using Event = std::variant<TextReceivedEvent, TextTranslatedEvent, StateChangedEvent, ActivationEvent, ChatMessageEvent, EmotionEvent, McpToolCallEvent>;
 
 class Observer {
  public:
   static constexpr size_t kMaxQueueSize = 10;
-
-  struct StateChangedEvent {
-    ChatState old_state;
-    ChatState new_state;
-  };
-
-  struct ChatMessageEvent {
-    ChatRole role;
-    std::string content;
-  };
-
-  struct ActivationEvent {
-    std::string code;
-    std::string message;
-  };
-
-  struct EmotionEvent {
-    std::string emotion;
-  };
-
-  struct IotMessageEvent {
-    std::string name;
-    std::string function;
-    std::map<std::string, iot::Value> parameters;
-  };
-
-  using Event = std::variant<StateChangedEvent, ActivationEvent, ChatMessageEvent, EmotionEvent, IotMessageEvent>;
 
   Observer() = default;
   virtual ~Observer() = default;

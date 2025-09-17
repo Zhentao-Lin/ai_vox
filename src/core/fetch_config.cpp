@@ -149,9 +149,9 @@ std::string Json2() {
 
 }  // namespace
 
-std::optional<Config> GetConfigFromServer(const std::string& url, const std::string& uuid) {
+std::shared_ptr<Config> GetConfigFromServer(const std::string& url, const std::string& uuid) {
   CLOGI();
-  Config config;
+  auto config = std::make_shared<Config>();
   esp_http_client_config_t http_client_config;
   memset(&http_client_config, 0, sizeof(http_client_config));
   http_client_config.url = url.c_str();
@@ -162,7 +162,7 @@ std::optional<Config> GetConfigFromServer(const std::string& url, const std::str
   auto client = esp_http_client_init(&http_client_config);
   if (client == nullptr) {
     CLOGE("esp_http_client_init failed.");
-    return std::nullopt;
+    return {};
   }
   esp_http_client_set_method(client, HTTP_METHOD_POST);
   esp_http_client_set_header(client, "Device-Id", GetMacAddress().c_str());
@@ -173,7 +173,7 @@ std::optional<Config> GetConfigFromServer(const std::string& url, const std::str
   if (err != ESP_OK) {
     CLOGE("esp_http_client_open failed. Error: %s", esp_err_to_name(err));
     esp_http_client_cleanup(client);
-    return std::nullopt;
+    return {};
   }
 
   auto wlen = esp_http_client_write(client, post_json.data(), post_json.length());
@@ -181,7 +181,7 @@ std::optional<Config> GetConfigFromServer(const std::string& url, const std::str
     CLOGE("esp_http_client_write failed.");
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return std::nullopt;
+    return {};
   }
 
   auto content_length = esp_http_client_fetch_headers(client);
@@ -189,7 +189,7 @@ std::optional<Config> GetConfigFromServer(const std::string& url, const std::str
     CLOGE("esp_http_client_fetch_headers failed.");
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return std::nullopt;
+    return {};
   }
 
   std::vector<uint8_t> response(content_length);
@@ -202,39 +202,39 @@ std::optional<Config> GetConfigFromServer(const std::string& url, const std::str
   auto* const root = cJSON_ParseWithLength(reinterpret_cast<const char*>(response.data()), response.size());
   if (!cJSON_IsObject(root)) {
     cJSON_Delete(root);
-    return std::nullopt;
+    return {};
   }
 
   auto* mqtt_json = cJSON_GetObjectItem(root, "mqtt");
   if (cJSON_IsObject(mqtt_json)) {
     auto* endpoint = cJSON_GetObjectItem(mqtt_json, "endpoint");
     if (cJSON_IsString(endpoint)) {
-      config.mqtt.endpoint = endpoint->valuestring;
+      config->mqtt.endpoint = endpoint->valuestring;
     }
 
     auto* client_id = cJSON_GetObjectItem(mqtt_json, "client_id");
     if (cJSON_IsString(client_id)) {
-      config.mqtt.client_id = client_id->valuestring;
+      config->mqtt.client_id = client_id->valuestring;
     }
 
     auto* username = cJSON_GetObjectItem(mqtt_json, "username");
     if (cJSON_IsString(username)) {
-      config.mqtt.username = username->valuestring;
+      config->mqtt.username = username->valuestring;
     }
 
     auto* password = cJSON_GetObjectItem(mqtt_json, "password");
     if (cJSON_IsString(password)) {
-      config.mqtt.password = password->valuestring;
+      config->mqtt.password = password->valuestring;
     }
 
     auto* publish_topic = cJSON_GetObjectItem(mqtt_json, "publish_topic");
     if (cJSON_IsString(publish_topic)) {
-      config.mqtt.publish_topic = publish_topic->valuestring;
+      config->mqtt.publish_topic = publish_topic->valuestring;
     }
 
     auto* subscribe_topic = cJSON_GetObjectItem(mqtt_json, "subscribe_topic");
     if (cJSON_IsString(subscribe_topic)) {
-      config.mqtt.subscribe_topic = subscribe_topic->valuestring;
+      config->mqtt.subscribe_topic = subscribe_topic->valuestring;
     }
   }
 
@@ -242,12 +242,12 @@ std::optional<Config> GetConfigFromServer(const std::string& url, const std::str
   if (cJSON_IsObject(activation_json)) {
     auto* code = cJSON_GetObjectItem(activation_json, "code");
     if (cJSON_IsString(code)) {
-      config.activation.code = code->valuestring;
+      config->activation.code = code->valuestring;
     }
 
     auto* message = cJSON_GetObjectItem(activation_json, "message");
     if (cJSON_IsString(message)) {
-      config.activation.message = message->valuestring;
+      config->activation.message = message->valuestring;
     }
   }
 

@@ -30,7 +30,7 @@ WifiConfigurator::WifiConfigurator(WiFiClass& wifi, const smartconfig_type_t sma
 }
 
 WifiConfigurator::~WifiConfigurator() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  std::lock_guard lock(mutex_);
   esp_event_handler_unregister(SC_EVENT, ESP_EVENT_ANY_ID, &EventHandler);
   esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &EventHandler);
   vQueueDelete(state_changed_queue_);
@@ -38,7 +38,7 @@ WifiConfigurator::~WifiConfigurator() {
 }
 
 void WifiConfigurator::Start() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  std::lock_guard lock(mutex_);
 
   if (state_ != State::kIdle) {
     return;
@@ -60,17 +60,32 @@ void WifiConfigurator::Start() {
   prefs.end();
 
   if (ssid.length() > 0) {
+    CLOGI("wifi begin with %s, %s", ssid.c_str(), password.c_str());
     wifi_.begin(ssid.c_str(), password.c_str());
     state_ = State::kConnecting;
     xQueueSend(state_changed_queue_, &state_, portMAX_DELAY);
   } else {
     return StartSmartConfig();
   }
-  return;
+}
+
+void WifiConfigurator::Start(const std::string& wifi_ssid, const std::string& wifi_password) {
+  std::lock_guard lock(mutex_);
+
+  if (state_ != State::kIdle) {
+    return;
+  }
+
+  Preferences prefs;
+  prefs.begin(kPreferenceKey, false);
+  prefs.putString("ssid", wifi_ssid.c_str());
+  prefs.putString("password", wifi_password.c_str());
+  prefs.end();
+  Start();
 }
 
 void WifiConfigurator::StartSmartConfig() {
-  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  std::lock_guard lock(mutex_);
   if (state_ == State::kSmartConfiguring) {
     return;
   }
@@ -129,7 +144,7 @@ void WifiConfigurator::OnEvent(esp_event_base_t event_base, int32_t event_id, vo
         const auto data = reinterpret_cast<smartconfig_event_got_ssid_pswd_t*>(event_data);
         CLOGI(
             "smartconfig got SSID and password, SSID: %.*s, password: %.*s", sizeof(data->ssid), data->ssid, sizeof(data->password), data->password);
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::lock_guard lock(mutex_);
         if (state_ != State::kSmartConfiguring) {
           return;
         }
@@ -141,7 +156,7 @@ void WifiConfigurator::OnEvent(esp_event_base_t event_base, int32_t event_id, vo
       }
       case SC_EVENT_SEND_ACK_DONE: {
         CLOGI("smartconfig send ack done");
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::lock_guard lock(mutex_);
         xEventGroupSetBits(event_group_, kSmartConfigDoneBit);
         const auto err = esp_smartconfig_internal_stop();
         if (err == ESP_OK) {
@@ -162,7 +177,7 @@ void WifiConfigurator::OnEvent(esp_event_base_t event_base, int32_t event_id, vo
       case IP_EVENT_STA_GOT_IP: {
         CLOGI("got ip: " IPSTR, IP2STR(&reinterpret_cast<ip_event_got_ip_t*>(event_data)->ip_info.ip));
         xEventGroupSetBits(event_group_, kConnectedBit);
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        std::lock_guard lock(mutex_);
         state_ = State::kConnected;
         xQueueSend(state_changed_queue_, &state_, portMAX_DELAY);
         if (finished()) {
