@@ -57,7 +57,7 @@ class ActiveTaskQueue {
     auto func = [f = std::forward<F>(f), ... args = std::forward<Args>(args)]() mutable { f(std::forward<Args>(args)...); };
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      tasks_.emplace_back(Task{order_++, std::chrono::steady_clock::now(), std::make_unique<TaskImpl<decltype(func)>>(std::move(func))});
+      tasks_.emplace_back(Task{order_++, std::chrono::steady_clock::now(), std::make_unique<TaskImpl<decltype(func)>>(std::move(func)), std::nullopt});
       std::make_heap(tasks_.begin(), tasks_.end(), std::greater<>{});
     }
     condition_.notify_one();
@@ -68,7 +68,7 @@ class ActiveTaskQueue {
     auto func = [f = std::forward<F>(f), ... args = std::forward<Args>(args)]() mutable { f(std::forward<Args>(args)...); };
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      tasks_.emplace_back(Task{order_++, std::move(time_point), std::make_unique<TaskImpl<decltype(func)>>(std::move(func))});
+      tasks_.emplace_back(Task{order_++, std::move(time_point), std::make_unique<TaskImpl<decltype(func)>>(std::move(func)), std::nullopt});
       std::make_heap(tasks_.begin(), tasks_.end(), std::greater<>{});
     }
     condition_.notify_one();
