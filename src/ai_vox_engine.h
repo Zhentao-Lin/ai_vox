@@ -27,7 +27,7 @@ class Engine {
   virtual void Start(std::shared_ptr<AudioInputDevice> audio_input_device, std::shared_ptr<AudioOutputDevice> audio_output_device) = 0;
   virtual void Advance() = 0;
   // virtual void Process() = 0;
-  virtual void SendText(std::string text);
+  virtual void SendText(std::string text) = 0;
   virtual void SendMcpCallResponse(const int64_t id, std::variant<std::string, int64_t, bool> response) = 0;
   virtual void SendMcpCallError(const int64_t id, const std::string error) = 0;
 
