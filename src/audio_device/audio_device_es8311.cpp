@@ -116,7 +116,7 @@ AudioDeviceEs8311::AudioDeviceEs8311(const i2c_master_bus_handle_t i2c_master_bu
   };
   ESP_ERROR_CHECK(esp_codec_dev_open(audio_device_, &sample_info));
   ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(audio_device_, 30.0));
-  ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(audio_device_, 80.0));
+  ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(audio_device_, volume_));
 }
 
 AudioDeviceEs8311::~AudioDeviceEs8311() {

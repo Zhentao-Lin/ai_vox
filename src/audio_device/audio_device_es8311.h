@@ -61,7 +61,7 @@ class AudioDeviceEs8311 : public AudioInputDevice, public AudioOutputDevice {
   const void* gpio_if_ = nullptr;
   const audio_codec_if_t* codec_if_ = nullptr;
   void* audio_device_ = nullptr;
-  uint16_t volume_ = 0;
+  uint16_t volume_ = 80;
   std::shared_ptr<AudioInputDevice> audio_input_device_;
   std::shared_ptr<AudioOutputDevice> audio_output_device_;
 };
